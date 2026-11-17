@@ -29,9 +29,13 @@ export default function App() {
   const [recentLogs, setRecentLogs] = useState([])
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Quick Action: Onboard Employee State
+  // Quick Action: Onboard Employee State (Step 1 & Step 2)
   const [onboardName, setOnboardName] = useState('')
   const [onboardEmail, setOnboardEmail] = useState('')
+  const [onboardDiscount, setOnboardDiscount] = useState('20')
+  const [onboardCredit, setOnboardCredit] = useState('25.00')
+  const [onboardLocation, setOnboardLocation] = useState('local')
+  const [lastCreatedAlert, setLastCreatedAlert] = useState(null)
   const [onboarding, setOnboarding] = useState(false)
 
   // Quick Action: Monthly Credit Run State
@@ -107,23 +111,35 @@ export default function App() {
   }, [sessionToken])
 
   // --------------------------------------------------------------------------
-  // Fetch Dashboard Data
+  // Fetch Dashboard Data (Settings, Employees, Recent Logs)
   // --------------------------------------------------------------------------
   const loadDashboardData = useCallback(async () => {
     if (!sessionToken) return
     setDataLoading(true)
     try {
-      const res = await apiFetch('/api/discounts?route=data')
-      if (res.ok) {
-        if (res.settings) {
-          setSettings({
-            employee_discount_percent: res.settings.employee_discount_percent ?? 20,
-            monthly_store_credit_amount: res.settings.monthly_store_credit_amount ?? 25.0,
-          })
-        }
-        setEmployees(res.employees || [])
-        setRecentLogs(res.recentLogs || [])
+      const [dataRes, empRes] = await Promise.all([
+        apiFetch('/api/discounts?route=data').catch(() => ({})),
+        apiFetch('/api/employees').catch(() => ({})),
+      ])
+
+      if (dataRes.settings) {
+        setSettings({
+          employee_discount_percent: dataRes.settings.employee_discount_percent ?? 20,
+          monthly_store_credit_amount: dataRes.settings.monthly_store_credit_amount ?? 25.0,
+        })
+        setOnboardDiscount(String(dataRes.settings.employee_discount_percent ?? 20))
+        setOnboardCredit(String(dataRes.settings.monthly_store_credit_amount ?? 25.0))
       }
+      setRecentLogs(dataRes.recentLogs || [])
+
+      // Merge /api/employees and /api/discounts employee lists
+      let list = []
+      if (empRes.employees && empRes.employees.length > 0) {
+        list = empRes.employees
+      } else if (dataRes.employees) {
+        list = dataRes.employees
+      }
+      setEmployees(list)
     } catch (err) {
       showToast('Failed to load dashboard data: ' + err.message, 'error')
     } finally {
@@ -236,7 +252,7 @@ export default function App() {
   }
 
   // --------------------------------------------------------------------------
-  // Handlers: Quick Actions
+  // Handlers: Quick Actions (Create Email-Locked Code via /api/employees/create)
   // --------------------------------------------------------------------------
   const handleOnboardSubmit = async (e) => {
     e.preventDefault()
@@ -245,19 +261,28 @@ export default function App() {
       return
     }
     setOnboarding(true)
+    setLastCreatedAlert(null)
     try {
-      const res = await apiFetch('/api/discounts?route=onboard', {
+      const res = await apiFetch('/api/employees/create', {
         method: 'POST',
         body: JSON.stringify({
-          name: onboardName.trim(),
-          email: onboardEmail.trim(),
+          full_name: onboardName.trim(),
+          work_email: onboardEmail.trim(),
+          discount_percentage: Number(onboardDiscount || settings.employee_discount_percent || 20),
+          monthly_credit_amount: Number(onboardCredit || settings.monthly_store_credit_amount || 25),
+          location_type: onboardLocation,
         }),
       })
-      if (res.ok) {
-        showToast(
-          `Onboarded ${res.employee.employee_name}! Code: ${res.employee.discount_code}`,
-          'success'
-        )
+      if (res.success || res.ok) {
+        const emp = res.employee
+        const code = emp.discount_code
+        const empName = emp.full_name || emp.employee_name
+        setLastCreatedAlert({
+          code,
+          name: empName,
+          email: emp.work_email,
+        })
+        showToast(`🎉 Generated Email-Locked Code ${code} for ${empName}!`, 'success')
         setOnboardName('')
         setOnboardEmail('')
         loadDashboardData()
@@ -270,7 +295,7 @@ export default function App() {
   }
 
   const handleIssueMonthlyCreditAll = async () => {
-    const activeCount = employees.filter((e) => e.status === 'Active').length
+    const activeCount = employees.filter((e) => (e.status || '').toLowerCase() === 'active').length
     const totalAmount = (activeCount * Number(settings.monthly_store_credit_amount || 0)).toFixed(2)
 
     if (activeCount === 0) {
@@ -304,11 +329,11 @@ export default function App() {
   }
 
   // --------------------------------------------------------------------------
-  // Handlers: Table Actions
+  // Handlers: Table Actions & Deactivation (/api/employees/deactivate)
   // --------------------------------------------------------------------------
   const handleOpenCreditModal = (emp) => {
     setSelectedEmployee(emp)
-    setCreditAmount(String(settings.monthly_store_credit_amount || '25.00'))
+    setCreditAmount(String(emp.monthly_credit_amount || settings.monthly_store_credit_amount || '25.00'))
     setCreditReason('Manual Employee Store Credit')
     setCreditModalOpen(true)
   }
@@ -331,9 +356,9 @@ export default function App() {
           reason: creditReason.trim(),
         }),
       })
-      if (res.ok) {
+      if (res.ok || res.success) {
         showToast(
-          `Successfully credited $${amt.toFixed(2)} to ${selectedEmployee.employee_name}!`,
+          `Successfully credited $${amt.toFixed(2)} to ${selectedEmployee.full_name || selectedEmployee.employee_name}!`,
           'success'
         )
         setCreditModalOpen(false)
@@ -347,27 +372,54 @@ export default function App() {
   }
 
   const handleToggleStatus = async (emp) => {
-    const nextStatus = emp.status === 'Active' ? 'Revoked' : 'Active'
-    const verb = nextStatus === 'Revoked' ? 'revoke' : 'reactivate'
-    const confirmed = window.confirm(
-      `Are you sure you want to ${verb} employee discount privileges for ${emp.employee_name}?\n\nThis will ${nextStatus === 'Revoked' ? 'deactivate' : 'activate'} their unique code in Shopify.`
-    )
-    if (!confirmed) return
+    const isCurrentlyActive = (emp.status || '').toLowerCase() === 'active'
+    const empName = emp.full_name || emp.employee_name || emp.work_email
 
-    try {
-      const res = await apiFetch('/api/discounts?route=toggle-status', {
-        method: 'POST',
-        body: JSON.stringify({
-          id: emp.id,
-          status: nextStatus,
-        }),
-      })
-      if (res.ok) {
-        showToast(`${emp.employee_name} discount code is now ${nextStatus}.`, 'success')
-        loadDashboardData()
+    if (isCurrentlyActive) {
+      const confirmed = window.confirm(
+        `Are you sure you want to deactivate discount privileges for ${empName}?\n\nThis will delete their Shopify Price Rule and deactivate their discount code.`
+      )
+      if (!confirmed) return
+
+      try {
+        const res = await apiFetch('/api/employees/deactivate', {
+          method: 'POST',
+          body: JSON.stringify({
+            id: emp.id,
+            price_rule_id: emp.shopify_price_rule_id || emp.shopify_discount_id,
+            work_email: emp.work_email,
+          }),
+        })
+        if (res.success || res.ok) {
+          showToast(`${empName} has been deactivated and Shopify price rule removed.`, 'success')
+          loadDashboardData()
+        }
+      } catch (err) {
+        showToast(err.message, 'error')
       }
-    } catch (err) {
-      showToast(err.message, 'error')
+    } else {
+      const confirmed = window.confirm(
+        `Reactivate employee discount code for ${empName} in Shopify?`
+      )
+      if (!confirmed) return
+      try {
+        const res = await apiFetch('/api/employees/create', {
+          method: 'POST',
+          body: JSON.stringify({
+            full_name: empName,
+            work_email: emp.work_email,
+            discount_percentage: emp.discount_percentage || emp.discount_percent || 20,
+            monthly_credit_amount: emp.monthly_credit_amount || 25,
+            location_type: emp.location_type || 'local',
+          }),
+        })
+        if (res.success || res.ok) {
+          showToast(`Reactivated code ${res.employee.discount_code} for ${empName}!`, 'success')
+          loadDashboardData()
+        }
+      } catch (err) {
+        showToast(err.message, 'error')
+      }
     }
   }
 
@@ -377,8 +429,8 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({ id: emp.id }),
       })
-      if (res.ok) {
-        showToast(`Slack DM resent to ${emp.employee_name}!`, 'success')
+      if (res.ok || res.success) {
+        showToast(`Slack DM resent to ${emp.full_name || emp.employee_name}!`, 'success')
       }
     } catch (err) {
       showToast(err.message, 'error')
@@ -397,7 +449,7 @@ export default function App() {
     if (!searchQuery) return true
     const q = searchQuery.toLowerCase()
     return (
-      (emp.employee_name || '').toLowerCase().includes(q) ||
+      (emp.full_name || emp.employee_name || '').toLowerCase().includes(q) ||
       (emp.work_email || '').toLowerCase().includes(q) ||
       (emp.discount_code || '').toLowerCase().includes(q)
     )
@@ -510,7 +562,7 @@ export default function App() {
             <img src="/ksc-logo.png" alt="Kawaii Slime Company" className="brand-logo" />
             <div className="brand-text">
               <span className="brand-title">Employee Discount & Store Credit</span>
-              <span className="brand-subtitle">Shopify Admin GraphQL & Slack Automation</span>
+              <span className="brand-subtitle">Shopify Admin API & Supabase Sync</span>
             </div>
           </div>
           <div className="user-profile">
@@ -595,57 +647,131 @@ export default function App() {
         </section>
 
         {/* ================================================================= */}
-        {/* SECTION 2: Quick Actions                                         */}
+        {/* SECTION 2: Quick Actions (Create Email-Locked Code Form)          */}
         {/* ================================================================= */}
         <section className="quick-actions-grid">
-          {/* Action 1: Onboard Employee */}
+          {/* Action 1: Onboard Employee (calls /api/employees/create) */}
           <div className="action-card">
             <div>
               <h2 className="card-title">
                 <span>➕</span> Onboard Employee
               </h2>
               <p className="card-desc">
-                Manually register an employee. Automatically creates their Shopify Customer, generates
-                their email-locked discount code ({settings.employee_discount_percent}%), issues initial
-                store credit (${Number(settings.monthly_store_credit_amount).toFixed(2)}), and sends a
-                welcome Slack DM.
+                Creates an email-locked discount code in Shopify via <code style={{ fontSize: '11px' }}>POST /api/employees/create</code> and saves to Supabase.
+                Format: <code style={{ fontSize: '11px' }}>EMP-FIRSTNAME-1234</code>.
               </p>
             </div>
 
+            {lastCreatedAlert && (
+              <div className="alert-box success" style={{ margin: '10px 0 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <strong>🎉 Generated Code:</strong> <code style={{ fontSize: '13px', fontWeight: 800 }}>{lastCreatedAlert.code}</code> locked to <strong>{lastCreatedAlert.email}</strong>!
+                </div>
+                <button
+                  type="button"
+                  className="copy-btn"
+                  onClick={() => handleCopyCode(lastCreatedAlert.code)}
+                  title="Copy code"
+                >
+                  📋 Copy
+                </button>
+              </div>
+            )}
+
             <form onSubmit={handleOnboardSubmit} className="onboard-form">
-              <div className="input-field-group">
-                <label className="input-label" htmlFor="newEmpName">
-                  Full Name
-                </label>
-                <input
-                  id="newEmpName"
-                  type="text"
-                  className="text-input"
-                  placeholder="e.g. Jessica Alba"
-                  value={onboardName}
-                  onChange={(e) => setOnboardName(e.target.value)}
-                  required
-                />
-              </div>
+              <div className="onboard-fields-grid">
+                <div className="input-field-group">
+                  <label className="input-label" htmlFor="newEmpName">
+                    Full Name
+                  </label>
+                  <input
+                    id="newEmpName"
+                    type="text"
+                    className="text-input"
+                    placeholder="e.g. Zunair Rafiq"
+                    value={onboardName}
+                    onChange={(e) => setOnboardName(e.target.value)}
+                    required
+                  />
+                </div>
 
-              <div className="input-field-group">
-                <label className="input-label" htmlFor="newEmpEmail">
-                  Work Email (QuickBooks / Slack)
-                </label>
-                <input
-                  id="newEmpEmail"
-                  type="email"
-                  className="text-input"
-                  placeholder="jessica@kawaiislimecompany.com"
-                  value={onboardEmail}
-                  onChange={(e) => setOnboardEmail(e.target.value)}
-                  required
-                />
-              </div>
+                <div className="input-field-group">
+                  <label className="input-label" htmlFor="newEmpEmail">
+                    Work Email
+                  </label>
+                  <input
+                    id="newEmpEmail"
+                    type="email"
+                    className="text-input"
+                    placeholder="zunair@kawaiislimecompany.com"
+                    value={onboardEmail}
+                    onChange={(e) => setOnboardEmail(e.target.value)}
+                    required
+                  />
+                </div>
 
-              <button type="submit" className="btn-primary" disabled={onboarding}>
-                {onboarding ? 'Onboarding...' : 'Onboard Now'}
-              </button>
+                <div className="input-field-group">
+                  <label className="input-label" htmlFor="newEmpDiscount">
+                    Discount %
+                  </label>
+                  <div className="input-wrapper">
+                    <input
+                      id="newEmpDiscount"
+                      type="number"
+                      min="1"
+                      max="100"
+                      className="text-input input-with-suffix"
+                      value={onboardDiscount}
+                      onChange={(e) => setOnboardDiscount(e.target.value)}
+                      required
+                    />
+                    <span className="input-suffix">%</span>
+                  </div>
+                </div>
+
+                <div className="input-field-group">
+                  <label className="input-label" htmlFor="newEmpCredit">
+                    Credit ($)
+                  </label>
+                  <div className="input-wrapper">
+                    <span className="input-prefix">$</span>
+                    <input
+                      id="newEmpCredit"
+                      type="number"
+                      min="0"
+                      step="0.50"
+                      className="text-input input-with-prefix"
+                      value={onboardCredit}
+                      onChange={(e) => setOnboardCredit(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="input-field-group">
+                  <label className="input-label" htmlFor="newEmpLocation">
+                    Delivery Type
+                  </label>
+                  <select
+                    id="newEmpLocation"
+                    className="select-input"
+                    value={onboardLocation}
+                    onChange={(e) => setOnboardLocation(e.target.value)}
+                  >
+                    <option value="local">Local - Warehouse Pickup</option>
+                    <option value="remote">Remote - Home Shipping</option>
+                  </select>
+                </div>
+
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={onboarding}
+                  style={{ height: '42px' }}
+                >
+                  {onboarding ? 'Creating in Shopify...' : '+ Create & Lock Code'}
+                </button>
+              </div>
             </form>
           </div>
 
@@ -658,19 +784,19 @@ export default function App() {
               <p className="card-desc">
                 Credits all currently <strong>Active</strong> employees in Shopify using the configured{' '}
                 <strong>${Number(settings.monthly_store_credit_amount).toFixed(2)}</strong> store credit
-                amount. Logs all transactions in Supabase and sends Slack DM alerts.
+                amount. Logs all transactions in Supabase.
               </p>
             </div>
 
             <div className="credit-run-box">
               <div className="credit-run-stats">
                 <span className="credit-run-title">
-                  {employees.filter((e) => e.status === 'Active').length} Active Employees
+                  {employees.filter((e) => (e.status || '').toLowerCase() === 'active').length} Active Employees
                 </span>
                 <span className="credit-run-desc">
                   Total disbursement: $
                   {(
-                    employees.filter((e) => e.status === 'Active').length *
+                    employees.filter((e) => (e.status || '').toLowerCase() === 'active').length *
                     Number(settings.monthly_store_credit_amount || 0)
                   ).toFixed(2)}
                 </span>
@@ -679,7 +805,7 @@ export default function App() {
                 type="button"
                 className="btn-secondary"
                 onClick={handleIssueMonthlyCreditAll}
-                disabled={runningMonthlyCredit || employees.filter((e) => e.status === 'Active').length === 0}
+                disabled={runningMonthlyCredit || employees.filter((e) => (e.status || '').toLowerCase() === 'active').length === 0}
               >
                 {runningMonthlyCredit ? 'Distributing Credits...' : '⚡ Issue Credit to All'}
               </button>
@@ -731,7 +857,8 @@ export default function App() {
                   <th>Work Email</th>
                   <th>Unique Discount Code</th>
                   <th>Discount %</th>
-                  <th>Total / Last Credit</th>
+                  <th>Monthly Credit</th>
+                  <th>Delivery Type</th>
                   <th>Status</th>
                   <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
@@ -739,31 +866,33 @@ export default function App() {
               <tbody>
                 {filteredEmployees.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '40px 14px', color: '#b47a4f' }}>
+                    <td colSpan={8} style={{ textAlign: 'center', padding: '40px 14px', color: '#b47a4f' }}>
                       {dataLoading ? 'Loading employee records...' : 'No employees found matching criteria.'}
                     </td>
                   </tr>
                 ) : (
                   filteredEmployees.map((emp) => {
-                    const initials = (emp.employee_name || 'E')
+                    const empName = emp.full_name || emp.employee_name || 'Staff'
+                    const initials = empName
                       .split(' ')
                       .map((p) => p[0])
                       .join('')
                       .slice(0, 2)
                       .toUpperCase()
-                    const lastCreditFormatted = emp.last_credit_issued_at
-                      ? new Date(emp.last_credit_issued_at).toLocaleDateString()
-                      : 'None yet'
+                    const isActive = (emp.status || '').toLowerCase() === 'active'
+                    const discountVal = emp.discount_percentage || emp.discount_percent || 20
+                    const creditVal = emp.monthly_credit_amount || emp.total_credit_issued || 25
+                    const locationType = emp.location_type || 'local'
 
                     return (
-                      <tr key={emp.id}>
+                      <tr key={emp.id || emp.work_email}>
                         {/* Name */}
                         <td>
                           <div className="emp-name-cell">
                             <div className="emp-initials">{initials}</div>
                             <div className="emp-info">
-                              <strong>{emp.employee_name}</strong>
-                              <span>{emp.slack_user_id ? 'Connected to Slack' : 'Pending Slack match'}</span>
+                              <strong>{empName}</strong>
+                              <span>{emp.shopify_customer_id ? `Shopify Cust: ${emp.shopify_customer_id}` : 'Synced'}</span>
                             </div>
                           </div>
                         </td>
@@ -791,30 +920,32 @@ export default function App() {
                         {/* Discount % */}
                         <td>
                           <span style={{ fontWeight: 800, color: 'var(--brown)' }}>
-                            {emp.discount_percent}% OFF
+                            {discountVal}% OFF
                           </span>
                         </td>
 
-                        {/* Total / Last Credit */}
+                        {/* Monthly Credit */}
                         <td>
                           <div>
                             <strong style={{ color: 'var(--green)' }}>
-                              ${Number(emp.total_credit_issued || 0).toFixed(2)}
+                              ${Number(creditVal).toFixed(2)}
                             </strong>
-                            <small style={{ display: 'block', color: 'var(--brown-soft)', fontSize: '10px' }}>
-                              Last: {lastCreditFormatted}
-                            </small>
                           </div>
+                        </td>
+
+                        {/* Delivery Type */}
+                        <td>
+                          {locationType === 'remote' ? (
+                            <span className="badge-delivery remote">📦 Home Shipping</span>
+                          ) : (
+                            <span className="badge-delivery">🏢 Local Pickup</span>
+                          )}
                         </td>
 
                         {/* Status */}
                         <td>
-                          <span
-                            className={`status-pill ${
-                              emp.status === 'Active' ? 'active' : 'revoked'
-                            }`}
-                          >
-                            {emp.status}
+                          <span className={`status-pill ${isActive ? 'active' : 'revoked'}`}>
+                            {isActive ? 'Active' : 'Inactive'}
                           </span>
                         </td>
 
@@ -825,7 +956,7 @@ export default function App() {
                               type="button"
                               className="btn-subtle success"
                               onClick={() => handleOpenCreditModal(emp)}
-                              disabled={emp.status !== 'Active'}
+                              disabled={!isActive}
                               title="Issue Store Credit"
                             >
                               💵 Issue Credit
@@ -833,11 +964,11 @@ export default function App() {
 
                             <button
                               type="button"
-                              className={`btn-subtle ${emp.status === 'Active' ? 'danger' : 'success'}`}
+                              className={`btn-subtle ${isActive ? 'danger' : 'success'}`}
                               onClick={() => handleToggleStatus(emp)}
-                              title={emp.status === 'Active' ? 'Revoke Discount' : 'Reactivate Discount'}
+                              title={isActive ? 'Delete Shopify price rule & deactivate' : 'Reactivate in Shopify'}
                             >
-                              {emp.status === 'Active' ? '🚫 Revoke' : '✅ Reactivate'}
+                              {isActive ? '🚫 Deactivate' : '✅ Reactivate'}
                             </button>
 
                             <button
@@ -859,7 +990,7 @@ export default function App() {
           </div>
         </section>
 
-        {/* Recent Store Credit Audit Logs (Collapsible or Preview) */}
+        {/* Recent Store Credit Audit Logs */}
         {recentLogs.length > 0 && (
           <section className="card-box" style={{ background: '#fffefd' }}>
             <div className="card-box-header">
@@ -924,7 +1055,7 @@ export default function App() {
               <div>
                 <h3 className="modal-title">Issue Store Credit</h3>
                 <p className="modal-desc">
-                  Credit Shopify account for <strong>{selectedEmployee.employee_name}</strong> (
+                  Credit Shopify account for <strong>{selectedEmployee.full_name || selectedEmployee.employee_name}</strong> (
                   {selectedEmployee.work_email})
                 </p>
               </div>

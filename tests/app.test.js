@@ -259,3 +259,123 @@ test('API Guards: Unauthorized request blocked without session', async () => {
   process.env.SUPABASE_URL = origUrl
 })
 
+test('Shopify REST 2026-01: generateEmpDiscountCode format EMP-{NAME}-{4DIGITS}', async () => {
+  const { generateEmpDiscountCode } = await import('../lib/shopify.js')
+  const code = generateEmpDiscountCode('Zunair Rafiq')
+  assert.match(code, /^EMP-ZUNAIR-\d{4}$/, 'Must match EMP-ZUNAIR-XXXX')
+  assert.ok(!code.includes(' '), 'Code must contain no spaces')
+  assert.equal(code, code.toUpperCase(), 'Code must be all uppercase')
+
+  const code2 = generateEmpDiscountCode('Sarah Jane Connor')
+  assert.match(code2, /^EMP-SARAH-\d{4}$/)
+})
+
+test('Shopify REST 2026-01: createEmailLockedPriceRule locks to prerequisite_customer_ids', async () => {
+  const { createEmailLockedPriceRule } = await import('../lib/shopify.js')
+  const res = await createEmailLockedPriceRule({
+    customerId: '7891234567',
+    discountPercentage: 20,
+    uniqueCode: 'EMP-TEST-1234',
+  })
+
+  assert.ok(res.priceRuleId, 'Price rule ID must be generated')
+  assert.equal(res.code, 'EMP-TEST-1234')
+  assert.equal(res.discountPercentage, 20)
+  assert.equal(res.customerId, '7891234567')
+})
+
+test('Backend Endpoint /api/employees/create: Validates inputs and creates email-locked discount', async () => {
+  const { default: createHandler } = await import('../api/employees/create.js')
+
+  // 1. Missing full name validation
+  let statusCode = 0
+  let jsonResult = null
+  const mockRes = {
+    setHeader: () => {},
+    status: (code) => {
+      statusCode = code
+      return { json: (d) => { jsonResult = d } }
+    },
+  }
+
+  await createHandler({
+    method: 'POST',
+    body: { full_name: '', work_email: 'test@kawaiislimecompany.com' },
+    headers: {},
+  }, mockRes)
+
+  assert.equal(statusCode, 400)
+  assert.equal(jsonResult.success, false)
+
+  // 2. Successful creation
+  statusCode = 0
+  jsonResult = null
+
+  await createHandler({
+    method: 'POST',
+    body: {
+      full_name: 'Zunair Rafiq',
+      work_email: 'zunair@kawaiislimecompany.com',
+      discount_percentage: 20,
+      monthly_credit_amount: 25.0,
+      location_type: 'local',
+    },
+    headers: {},
+  }, mockRes)
+
+  assert.equal(statusCode, 201)
+  assert.equal(jsonResult.success, true)
+  assert.ok(jsonResult.employee)
+  assert.match(jsonResult.employee.discount_code, /^EMP-ZUNAIR-\d{4}$/)
+  assert.equal(jsonResult.employee.location_type, 'local')
+  assert.equal(jsonResult.employee.status, 'active')
+})
+
+test('Backend Endpoint /api/employees/deactivate: Deactivates employee & price rule', async () => {
+  const { default: deactivateHandler } = await import('../api/employees/deactivate.js')
+
+  let statusCode = 0
+  let jsonResult = null
+  const mockRes = {
+    setHeader: () => {},
+    status: (code) => {
+      statusCode = code
+      return { json: (d) => { jsonResult = d } }
+    },
+  }
+
+  await deactivateHandler({
+    method: 'POST',
+    body: {
+      work_email: 'zunair@kawaiislimecompany.com',
+      shopify_price_rule_id: '9988776655',
+    },
+    headers: {},
+  }, mockRes)
+
+  assert.equal(statusCode, 200)
+  assert.equal(jsonResult.success, true)
+  assert.equal(jsonResult.employee.status, 'inactive')
+})
+
+test('Backend Endpoint /api/employees: Lists employees', async () => {
+  const { default: listHandler } = await import('../api/employees/index.js')
+
+  let statusCode = 0
+  let jsonResult = null
+  const mockRes = {
+    setHeader: () => {},
+    status: (code) => {
+      statusCode = code
+      return { json: (d) => { jsonResult = d } }
+    },
+  }
+
+  await listHandler({ method: 'GET', headers: {} }, mockRes)
+
+  assert.equal(statusCode, 200)
+  assert.equal(jsonResult.success, true)
+  assert.ok(Array.isArray(jsonResult.employees))
+})
+
+
