@@ -47,7 +47,7 @@ export default async function handler(req, res) {
     try {
       const { data: found } = await supabase
         .from('employees')
-        .select('id, discount_code, work_email')
+        .select('id, discount_code, work_email, status')
         .eq('work_email', workEmail)
         .maybeSingle()
       if (found) existingEmployee = found
@@ -57,14 +57,19 @@ export default async function handler(req, res) {
       try {
         const { data: foundAlt } = await supabase
           .from('employee_discounts')
-          .select('id, discount_code, work_email')
+          .select('id, discount_code, work_email, status')
           .eq('work_email', workEmail)
           .maybeSingle()
         if (foundAlt) existingEmployee = foundAlt
       } catch {}
     }
 
-    if (existingEmployee) {
+    const isReactivating =
+      existingEmployee &&
+      (String(existingEmployee.status).toLowerCase() === 'inactive' ||
+        String(existingEmployee.status).toLowerCase() === 'revoked')
+
+    if (existingEmployee && !isReactivating) {
       return res.status(409).json({
         success: false,
         error: `An employee with work email "${workEmail}" is already registered (Code: ${existingEmployee.discount_code}).`,
@@ -106,24 +111,32 @@ export default async function handler(req, res) {
     let savedEmployee = null
     let saveError = null
 
-    // Try inserting into `employees`
+    // Try updating or inserting into `employees`
     try {
-      const { data: emp, error: err } = await supabase
-        .from('employees')
-        .insert(employeeRecord)
-        .select()
-        .single()
+      let op = null
+      if (isReactivating && existingEmployee?.id) {
+        op = supabase.from('employees').update(employeeRecord).eq('id', existingEmployee.id)
+      } else {
+        op = supabase.from('employees').insert(employeeRecord)
+      }
+
+      const { data: emp, error: err } = await op.select().single()
 
       if (!err && emp) {
         savedEmployee = emp
       } else if (err && String(err.message).includes('shopify_price_rule_id')) {
         // If existing table doesn't have shopify_price_rule_id, omit that column
         const { shopify_price_rule_id: _omitted, ...recordWithoutRuleId } = employeeRecord
-        const { data: retryEmp, error: retryErr } = await supabase
-          .from('employees')
-          .insert(recordWithoutRuleId)
-          .select()
-          .single()
+        let retryOp = null
+        if (isReactivating && existingEmployee?.id) {
+          retryOp = supabase
+            .from('employees')
+            .update(recordWithoutRuleId)
+            .eq('id', existingEmployee.id)
+        } else {
+          retryOp = supabase.from('employees').insert(recordWithoutRuleId)
+        }
+        const { data: retryEmp, error: retryErr } = await retryOp.select().single()
         if (!retryErr && retryEmp) {
           savedEmployee = { ...retryEmp, shopify_price_rule_id: shopifyPriceRuleId }
         } else {
@@ -150,7 +163,7 @@ export default async function handler(req, res) {
       }
       const { data: altEmp } = await supabase
         .from('employee_discounts')
-        .insert(fallbackRecord)
+        .upsert(fallbackRecord, { onConflict: 'work_email' })
         .select()
         .single()
 

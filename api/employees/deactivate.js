@@ -81,28 +81,37 @@ export default async function handler(req, res) {
     }
 
     // 2. Update status in Supabase `employees` table
-    const nowIso = new Date().toISOString()
     let updatedEmployee = null
 
     try {
       let updateQuery = supabase
         .from('employees')
-        .update({ status: 'inactive', updated_at: nowIso })
+        .update({ status: 'inactive' })
       if (employee?.id) updateQuery = updateQuery.eq('id', employee.id)
       else if (workEmail) updateQuery = updateQuery.eq('work_email', workEmail)
-      const { data } = await updateQuery.select().maybeSingle()
-      if (data) updatedEmployee = data
-    } catch {}
+      const { data, error } = await updateQuery.select().maybeSingle()
+      if (!error && data) {
+        updatedEmployee = data
+      }
+    } catch (err) {
+      console.warn('[Deactivate] Error updating employees table:', err.message)
+    }
 
-    // Also update `employee_discounts`
+    // Also update `employee_discounts` to keep tables in sync
     try {
+      const emailToMatch = workEmail || employee?.work_email
       let updateAlt = supabase
         .from('employee_discounts')
-        .update({ status: 'Revoked', updated_at: nowIso })
-      if (employee?.id) updateAlt = updateAlt.eq('id', employee.id)
-      else if (workEmail) updateAlt = updateAlt.eq('work_email', workEmail)
+        .update({ status: 'Revoked' })
+      if (emailToMatch) {
+        updateAlt = updateAlt.eq('work_email', emailToMatch)
+      } else if (employee?.id) {
+        updateAlt = updateAlt.eq('id', employee.id)
+      }
       await updateAlt
-    } catch {}
+    } catch (err) {
+      console.warn('[Deactivate] Error updating employee_discounts table:', err.message)
+    }
 
     return res.status(200).json({
       success: true,
@@ -111,7 +120,6 @@ export default async function handler(req, res) {
       employee: updatedEmployee || {
         ...employee,
         status: 'inactive',
-        updated_at: nowIso,
       },
     })
   } catch (error) {
