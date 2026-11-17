@@ -47,26 +47,20 @@ export default async function handler(req, res) {
     try {
       const { data: found } = await supabase
         .from('employees')
-        .select('*')
+        .select('id, discount_code, work_email')
         .eq('work_email', workEmail)
         .maybeSingle()
-      existingEmployee = found
-    } catch {
-      // If employees table doesn't exist, check employee_discounts table
+      if (found) existingEmployee = found
+    } catch {}
+
+    if (!existingEmployee) {
       try {
         const { data: foundAlt } = await supabase
           .from('employee_discounts')
-          .select('*')
+          .select('id, discount_code, work_email')
           .eq('work_email', workEmail)
           .maybeSingle()
-        if (foundAlt) {
-          existingEmployee = {
-            id: foundAlt.id,
-            full_name: foundAlt.employee_name,
-            work_email: foundAlt.work_email,
-            discount_code: foundAlt.discount_code,
-          }
-        }
+        if (foundAlt) existingEmployee = foundAlt
       } catch {}
     }
 
@@ -96,7 +90,7 @@ export default async function handler(req, res) {
 
     const shopifyPriceRuleId = String(priceRuleResult.priceRuleId)
 
-    // 5. Save to Supabase (public.employees)
+    // 5. Save to Supabase (public.employees & public.employee_discounts)
     const employeeRecord = {
       full_name: fullName,
       work_email: workEmail,
@@ -119,14 +113,30 @@ export default async function handler(req, res) {
         .insert(employeeRecord)
         .select()
         .single()
-      if (err) saveError = err
-      else savedEmployee = emp
+
+      if (!err && emp) {
+        savedEmployee = emp
+      } else if (err && String(err.message).includes('shopify_price_rule_id')) {
+        // If existing table doesn't have shopify_price_rule_id, omit that column
+        const { shopify_price_rule_id: _omitted, ...recordWithoutRuleId } = employeeRecord
+        const { data: retryEmp, error: retryErr } = await supabase
+          .from('employees')
+          .insert(recordWithoutRuleId)
+          .select()
+          .single()
+        if (!retryErr && retryEmp) {
+          savedEmployee = { ...retryEmp, shopify_price_rule_id: shopifyPriceRuleId }
+        } else {
+          saveError = retryErr
+        }
+      } else {
+        saveError = err
+      }
     } catch (e) {
       saveError = e
     }
 
-    // If table `employees` had an error (e.g. table not created yet or different schema),
-    // also write to `employee_discounts` to ensure continuous data integrity
+    // Also sync to `employee_discounts` to guarantee data redundancy & backward compatibility
     try {
       const fallbackRecord = {
         employee_name: fullName,
