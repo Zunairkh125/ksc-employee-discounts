@@ -88,7 +88,11 @@ export default async function handler(req, res) {
           updated_at: new Date().toISOString(),
           updated_by: 'System',
         }
-        await supabase.from('discount_settings').upsert(settings).catch(() => {})
+        try {
+          await supabase.from('discount_settings').upsert(settings)
+        } catch (e) {
+          console.warn('Settings upsert warning:', e.message)
+        }
       }
 
       // Fetch all employees
@@ -257,15 +261,19 @@ export default async function handler(req, res) {
 
       // 5. Log store credit transaction
       if (creditTx) {
-        await supabase.from('store_credit_logs').insert({
-          employee_discount_id: employee.id,
-          employee_name: name,
-          work_email: email,
-          amount: initialCredit,
-          reason: 'Initial Onboarding Store Credit',
-          shopify_transaction_id: creditTx.transactionId,
-          status: 'Success',
-        }).catch((err) => console.error('Credit log error:', err.message))
+        try {
+          await supabase.from('store_credit_logs').insert({
+            employee_discount_id: employee.id,
+            employee_name: name,
+            work_email: email,
+            amount: initialCredit,
+            reason: 'Initial Onboarding Store Credit',
+            shopify_transaction_id: creditTx.transactionId,
+            status: 'Success',
+          })
+        } catch (logErr) {
+          console.error('Credit log error:', logErr.message)
+        }
       }
 
       // 6. Send Slack DM with instructions
@@ -334,15 +342,19 @@ export default async function handler(req, res) {
         })
       } catch (shopifyErr) {
         // Log failure
-        await supabase.from('store_credit_logs').insert({
-          employee_discount_id: employee.id,
-          employee_name: employee.employee_name,
-          work_email: employee.work_email,
-          amount,
-          reason,
-          status: 'Failed',
-          error_message: shopifyErr.message,
-        }).catch(() => {})
+        try {
+          await supabase.from('store_credit_logs').insert({
+            employee_discount_id: employee.id,
+            employee_name: employee.employee_name,
+            work_email: employee.work_email,
+            amount,
+            reason,
+            status: 'Failed',
+            error_message: shopifyErr.message,
+          })
+        } catch (logErr) {
+          console.error('Store credit failure log error:', logErr.message)
+        }
 
         return res.status(500).json({ ok: false, error: `Shopify error: ${shopifyErr.message}` })
       }
@@ -492,11 +504,14 @@ export default async function handler(req, res) {
 
       // Save slack_user_id if not previously saved
       if (!employee.slack_user_id) {
-        await supabase
-          .from('employee_discounts')
-          .update({ slack_user_id: slackUserId })
-          .eq('id', employee.id)
-          .catch(() => {})
+        try {
+          await supabase
+            .from('employee_discounts')
+            .update({ slack_user_id: slackUserId })
+            .eq('id', employee.id)
+        } catch (updErr) {
+          console.warn('Slack user ID update warning:', updErr.message)
+        }
       }
 
       return res.status(200).json({
@@ -586,15 +601,19 @@ export default async function handler(req, res) {
         } catch (err) {
           failed++
           results.push({ email: emp.work_email, status: 'Failed', error: err.message })
-          await supabase.from('store_credit_logs').insert({
-            employee_discount_id: emp.id,
-            employee_name: emp.employee_name,
-            work_email: emp.work_email,
-            amount: monthlyAmount,
-            reason: 'Monthly Employee Store Credit',
-            status: 'Failed',
-            error_message: err.message,
-          }).catch(() => {})
+          try {
+            await supabase.from('store_credit_logs').insert({
+              employee_discount_id: emp.id,
+              employee_name: emp.employee_name,
+              work_email: emp.work_email,
+              amount: monthlyAmount,
+              reason: 'Monthly Employee Store Credit',
+              status: 'Failed',
+              error_message: err.message,
+            })
+          } catch (logErr) {
+            console.error('Store credit log error:', logErr.message)
+          }
         }
       }
 

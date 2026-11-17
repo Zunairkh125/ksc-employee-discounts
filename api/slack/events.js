@@ -168,15 +168,19 @@ export default async function handler(req, res) {
                 .single()
 
               if (txResult && newEmp) {
-                await supabase.from('store_credit_logs').insert({
-                  employee_discount_id: newEmp.id,
-                  employee_name: realName,
-                  work_email: email,
-                  amount: initialCredit,
-                  reason: 'Initial Onboarding Store Credit (team_join)',
-                  shopify_transaction_id: txResult.transactionId,
-                  status: 'Success',
-                }).catch(() => {})
+                try {
+                  await supabase.from('store_credit_logs').insert({
+                    employee_discount_id: newEmp.id,
+                    employee_name: realName,
+                    work_email: email,
+                    amount: initialCredit,
+                    reason: 'Initial Onboarding Store Credit (team_join)',
+                    shopify_transaction_id: txResult.transactionId,
+                    status: 'Success',
+                  })
+                } catch (logErr) {
+                  console.error('team_join log error:', logErr.message)
+                }
               }
 
               // 5. Send Welcome DM
