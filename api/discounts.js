@@ -95,14 +95,50 @@ export default async function handler(req, res) {
         }
       }
 
-      // Fetch all employees
-      const { data: employees, error: empErr } = await supabase
-        .from('employee_discounts')
-        .select('*')
-        .order('created_at', { ascending: false })
+      // Fetch all employees from `employees` table first
+      let employeeList = []
+      try {
+        const { data: emps, error: empErr } = await supabase
+          .from('employees')
+          .select('*')
+          .order('created_at', { ascending: false })
+        if (!empErr && Array.isArray(emps) && emps.length > 0) {
+          employeeList = emps.map((e) => ({
+            id: e.id,
+            employee_name: e.full_name,
+            full_name: e.full_name,
+            work_email: e.work_email,
+            shopify_customer_id: e.shopify_customer_id,
+            shopify_discount_id: e.shopify_discount_id || e.shopify_price_rule_id,
+            discount_code: e.discount_code,
+            discount_percent: e.discount_percentage,
+            discount_percentage: e.discount_percentage,
+            monthly_credit_amount: e.monthly_credit_amount,
+            location_type: e.location_type || 'local',
+            status:
+              e.is_active === false || String(e.status || '').toLowerCase() === 'inactive'
+                ? 'Revoked'
+                : 'Active',
+            is_active: e.is_active !== false && String(e.status || '').toLowerCase() === 'active',
+            slack_user_id: e.slack_user_id,
+            created_at: e.created_at,
+          }))
+        }
+      } catch (err) {
+        console.warn('employees select warning:', err.message)
+      }
 
-      if (empErr) {
-        console.error('[/api/discounts data] Employee select error:', empErr)
+      // Fallback to employee_discounts table if employees table empty
+      if (employeeList.length === 0) {
+        try {
+          const { data: employees } = await supabase
+            .from('employee_discounts')
+            .select('*')
+            .order('created_at', { ascending: false })
+          if (Array.isArray(employees)) {
+            employeeList = employees
+          }
+        } catch {}
       }
 
       // Fetch recent store credit logs
@@ -119,7 +155,7 @@ export default async function handler(req, res) {
       return res.status(200).json({
         ok: true,
         settings,
-        employees: employees || [],
+        employees: employeeList,
         recentLogs: recentLogs || [],
       })
     }
@@ -319,18 +355,52 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'Credit amount must be greater than 0.' })
       }
 
-      const { data: employee, error: empErr } = await supabase
-        .from('employee_discounts')
-        .select('*')
-        .eq('id', employeeId)
-        .single()
+      let employee = null
 
-      if (empErr || !employee) {
+      // Look up in `employees` table first
+      try {
+        const { data: emp } = await supabase
+          .from('employees')
+          .select('*')
+          .eq('id', employeeId)
+          .maybeSingle()
+        if (emp) {
+          employee = {
+            id: emp.id,
+            employee_name: emp.full_name,
+            work_email: emp.work_email,
+            shopify_customer_id: emp.shopify_customer_id,
+            shopify_discount_id: emp.shopify_discount_id || emp.shopify_price_rule_id,
+            discount_code: emp.discount_code,
+            discount_percent: emp.discount_percentage,
+            total_credit_issued: emp.monthly_credit_amount,
+            status:
+              emp.is_active !== false && String(emp.status || '').toLowerCase() === 'active'
+                ? 'Active'
+                : 'Revoked',
+            slack_user_id: emp.slack_user_id,
+          }
+        }
+      } catch {}
+
+      // Fallback lookup in `employee_discounts` table
+      if (!employee) {
+        try {
+          const { data: legacyEmp } = await supabase
+            .from('employee_discounts')
+            .select('*')
+            .eq('id', employeeId)
+            .maybeSingle()
+          if (legacyEmp) employee = legacyEmp
+        } catch {}
+      }
+
+      if (!employee) {
         return res.status(404).json({ ok: false, error: 'Employee not found.' })
       }
 
       if (employee.status !== 'Active') {
-        return res.status(400).json({ ok: false, error: 'Cannot issue credit to a revoked employee.' })
+        return res.status(400).json({ ok: false, error: 'Cannot issue credit to an inactive/revoked employee.' })
       }
 
       // Call Shopify GraphQL
@@ -345,6 +415,7 @@ export default async function handler(req, res) {
         try {
           await supabase.from('store_credit_logs').insert({
             employee_discount_id: employee.id,
+            employee_id: employee.id,
             employee_name: employee.employee_name,
             work_email: employee.work_email,
             amount,
@@ -359,22 +430,37 @@ export default async function handler(req, res) {
         return res.status(500).json({ ok: false, error: `Shopify error: ${shopifyErr.message}` })
       }
 
-      // Update employee totals
-      const newTotal = Number(employee.total_credit_issued || 0) + amount
       const nowIso = new Date().toISOString()
 
-      const { data: updatedEmployee } = await supabase
-        .from('employee_discounts')
-        .update({
-          total_credit_issued: newTotal,
-          last_credit_issued_at: nowIso,
-          updated_at: nowIso,
-        })
-        .eq('id', employee.id)
-        .select()
-        .single()
+      // Update in employees table
+      try {
+        await supabase
+          .from('employees')
+          .update({
+            last_credited_at: nowIso,
+            updated_at: nowIso,
+          })
+          .eq('id', employee.id)
+      } catch {}
 
-      // Log success in store_credit_logs and credit_ledger
+      // Update in employee_discounts table
+      let updatedEmployee = employee
+      try {
+        const newTotal = Number(employee.total_credit_issued || 0) + amount
+        const { data: updAlt } = await supabase
+          .from('employee_discounts')
+          .update({
+            total_credit_issued: newTotal,
+            last_credit_issued_at: nowIso,
+            updated_at: nowIso,
+          })
+          .eq('work_email', employee.work_email)
+          .select()
+          .maybeSingle()
+        if (updAlt) updatedEmployee = updAlt
+      } catch {}
+
+      // Log success in credit_ledger
       try {
         await supabase.from('credit_ledger').insert({
           employee_id: employee.id,
@@ -383,18 +469,23 @@ export default async function handler(req, res) {
           shopify_transaction_id: txResult.transactionId,
           created_at: nowIso,
         })
-      } catch {}
+      } catch (ledgerErr) {
+        console.warn('credit_ledger insert warning:', ledgerErr.message)
+      }
 
-      await supabase.from('store_credit_logs').insert({
-        employee_discount_id: employee.id,
-        employee_id: employee.id,
-        employee_name: employee.employee_name,
-        work_email: employee.work_email,
-        amount,
-        reason,
-        shopify_transaction_id: txResult.transactionId,
-        status: 'Success',
-      })
+      // Log success in store_credit_logs
+      try {
+        await supabase.from('store_credit_logs').insert({
+          employee_discount_id: employee.id,
+          employee_id: employee.id,
+          employee_name: employee.employee_name,
+          work_email: employee.work_email,
+          amount,
+          reason,
+          shopify_transaction_id: txResult.transactionId,
+          status: 'Success',
+        })
+      } catch {}
 
       // Send Slack notification if possible
       let slackTarget = employee.slack_user_id
@@ -431,18 +522,46 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'Status must be Active or Revoked.' })
       }
 
-      const { data: employee, error: empErr } = await supabase
-        .from('employee_discounts')
-        .select('*')
-        .eq('id', employeeId)
-        .single()
+      let employee = null
 
-      if (empErr || !employee) {
+      // Look up in `employees` table first
+      try {
+        const { data: emp } = await supabase
+          .from('employees')
+          .select('*')
+          .eq('id', employeeId)
+          .maybeSingle()
+        if (emp) {
+          employee = {
+            id: emp.id,
+            employee_name: emp.full_name,
+            work_email: emp.work_email,
+            shopify_discount_id: emp.shopify_discount_id || emp.shopify_price_rule_id,
+            status: targetStatus,
+          }
+        }
+      } catch {}
+
+      // Fallback to `employee_discounts` table
+      if (!employee) {
+        try {
+          const { data: legacyEmp } = await supabase
+            .from('employee_discounts')
+            .select('*')
+            .eq('id', employeeId)
+            .maybeSingle()
+          if (legacyEmp) employee = legacyEmp
+        } catch {}
+      }
+
+      if (!employee) {
         return res.status(404).json({ ok: false, error: 'Employee not found.' })
       }
 
+      const isRevoking = targetStatus === 'Revoked'
+
       // Update in Shopify
-      if (targetStatus === 'Revoked') {
+      if (isRevoking) {
         await deactivateDiscountCode(employee.shopify_discount_id).catch((err) => {
           console.warn('[toggle-status] Deactivation warning:', err.message)
         })
@@ -452,19 +571,34 @@ export default async function handler(req, res) {
         })
       }
 
-      const { data: updated, error: updErr } = await supabase
-        .from('employee_discounts')
-        .update({
-          status: targetStatus,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', employee.id)
-        .select()
-        .single()
+      const nowIso = new Date().toISOString()
 
-      if (updErr) {
-        return res.status(500).json({ ok: false, error: 'Failed to update employee status in database.' })
-      }
+      // Update employees table
+      try {
+        await supabase
+          .from('employees')
+          .update({
+            is_active: !isRevoking,
+            status: isRevoking ? 'inactive' : 'active',
+            updated_at: nowIso,
+          })
+          .eq('id', employee.id)
+      } catch {}
+
+      // Update employee_discounts table
+      let updated = employee
+      try {
+        const { data: updAlt } = await supabase
+          .from('employee_discounts')
+          .update({
+            status: targetStatus,
+            updated_at: nowIso,
+          })
+          .eq('work_email', employee.work_email)
+          .select()
+          .maybeSingle()
+        if (updAlt) updated = updAlt
+      } catch {}
 
       return res.status(200).json({
         ok: true,
@@ -480,13 +614,41 @@ export default async function handler(req, res) {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
       const employeeId = clean(req.body?.id)
-      const { data: employee, error: empErr } = await supabase
-        .from('employee_discounts')
-        .select('*')
-        .eq('id', employeeId)
-        .single()
+      let employee = null
 
-      if (empErr || !employee) {
+      // Look up in `employees` table first
+      try {
+        const { data: emp } = await supabase
+          .from('employees')
+          .select('*')
+          .eq('id', employeeId)
+          .maybeSingle()
+        if (emp) {
+          employee = {
+            id: emp.id,
+            employee_name: emp.full_name,
+            work_email: emp.work_email,
+            discount_code: emp.discount_code,
+            discount_percent: emp.discount_percentage,
+            total_credit_issued: emp.monthly_credit_amount,
+            slack_user_id: emp.slack_user_id,
+          }
+        }
+      } catch {}
+
+      // Fallback to `employee_discounts` table
+      if (!employee) {
+        try {
+          const { data: legacyEmp } = await supabase
+            .from('employee_discounts')
+            .select('*')
+            .eq('id', employeeId)
+            .maybeSingle()
+          if (legacyEmp) employee = legacyEmp
+        } catch {}
+      }
+
+      if (!employee) {
         return res.status(404).json({ ok: false, error: 'Employee not found.' })
       }
 
@@ -517,12 +679,17 @@ export default async function handler(req, res) {
       if (!employee.slack_user_id) {
         try {
           await supabase
-            .from('employee_discounts')
+            .from('employees')
             .update({ slack_user_id: slackUserId })
             .eq('id', employee.id)
-        } catch (updErr) {
-          console.warn('Slack user ID update warning:', updErr.message)
-        }
+        } catch {}
+
+        try {
+          await supabase
+            .from('employee_discounts')
+            .update({ slack_user_id: slackUserId })
+            .eq('work_email', employee.work_email)
+        } catch {}
       }
 
       return res.status(200).json({
