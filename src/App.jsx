@@ -538,7 +538,7 @@ export default function App() {
                   type="text"
                   maxLength={4}
                   className="text-input"
-                  placeholder="e.g. 5821 (or 1234 in test mode)"
+                  placeholder="Enter 4-digit code"
                   value={loginCode}
                   onChange={(e) => setLoginCode(e.target.value)}
                   style={{ textAlign: 'center', letterSpacing: '0.25em', fontSize: '18px' }}
@@ -793,11 +793,11 @@ export default function App() {
             </form>
           </div>
 
-          {/* Action 2: Run Monthly Store Credit (Test Run) */}
+          {/* Action 2: Run Monthly Store Credit */}
           <div className="action-card">
             <div>
               <h2 className="card-title">
-                <span>🎁</span> Run Monthly Credit Now (Test Run)
+                <span>🎁</span> Run Monthly Store Credit Disbursement
               </h2>
               <p className="card-desc">
                 Immediately credits all currently <strong>Active</strong> employees in Shopify using the configured{' '}

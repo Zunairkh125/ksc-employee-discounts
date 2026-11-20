@@ -1,5 +1,5 @@
 import { clean, admin, jsonError } from '../lib/db.js'
-import { getSession } from '../lib/session.js'
+import { getSession, isEmailAuthorized } from '../lib/session.js'
 import { lookupUserByEmail, sendDirectMessage } from '../lib/slack.js'
 import {
   findOrCreateCustomer,
@@ -9,19 +9,18 @@ import {
   activateDiscountCode,
 } from '../lib/shopify.js'
 
-function getAuth(req) {
+async function getAuth(req, supabase) {
   const cronSecret = clean(process.env.CRON_SECRET)
   const authHeader = clean(req.headers?.authorization || req.headers?.Authorization)
   if (cronSecret && authHeader === `Bearer ${cronSecret}`) {
     return { isCron: true, user: { name: 'Vercel Cron Service', role: 'System' } }
   }
   const session = getSession(req)
-  if (session) return { isCron: false, user: session }
-
-  // Allow fallback in development if no Supabase configured yet
-  const hasSupabase = Boolean(process.env.SUPABASE_URL && !process.env.SUPABASE_URL.includes('your-supabase'))
-  if (!hasSupabase) {
-    return { isDev: true, user: { name: 'KSC Dev Admin', role: 'Admin' } }
+  if (session?.email) {
+    const isAuth = await isEmailAuthorized(session.email, supabase)
+    if (isAuth) {
+      return { isCron: false, user: session }
+    }
   }
   return null
 }
@@ -58,14 +57,14 @@ export default async function handler(req, res) {
   }
 
   const route = clean(req.query?.route || 'data').toLowerCase()
-  const auth = getAuth(req)
+  const supabase = admin()
+  const auth = await getAuth(req, supabase)
 
   if (!auth) {
-    return res.status(401).json({ ok: false, error: 'Unauthorized: valid session or secret required.' })
+    return res.status(401).json({ ok: false, error: 'Unauthorized: valid authorized admin session required.' })
   }
 
   try {
-    const supabase = admin()
 
     // ------------------------------------------------------------------------
     // 1. Fetch Dashboard Data (Settings, Employees, Recent Logs)

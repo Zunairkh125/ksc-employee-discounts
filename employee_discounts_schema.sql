@@ -113,7 +113,28 @@ create table if not exists public.discount_login_codes (
   created_at timestamptz not null default now()
 );
 
--- 7. Performance Indexes
+-- 7. Authorized Users Allowlist Table (Strict Access Control)
+create table if not exists public.authorized_users (
+  id uuid primary key default gen_random_uuid(),
+  email text not null unique,
+  name text,
+  slack_user_id text,
+  role text not null default 'admin' check (role in ('admin', 'manager', 'viewer')),
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Seed initial authorized admins
+insert into public.authorized_users (email, name, role, is_active)
+values
+  ('zunair@kawaiislimecompany.com', 'Zunair Rafiq', 'admin', true),
+  ('junaid@kawaiislimecompany.com', 'Junaid K.', 'admin', true),
+  ('april@kawaiislimecompany.com', 'April Anderson', 'admin', true),
+  ('admin@kawaiislimecompany.com', 'KSC Administrator', 'admin', true)
+on conflict (email) do update set is_active = true, updated_at = now();
+
+-- 8. Performance Indexes
 create index if not exists idx_employees_email on public.employees(work_email);
 create index if not exists idx_employees_code on public.employees(discount_code);
 create index if not exists idx_employees_is_active on public.employees(is_active);
@@ -126,22 +147,25 @@ create index if not exists idx_employee_discounts_status on public.employee_disc
 create index if not exists idx_store_credit_logs_email on public.store_credit_logs(work_email);
 create index if not exists idx_store_credit_logs_created on public.store_credit_logs(created_at desc);
 create index if not exists idx_discount_login_codes_lookup on public.discount_login_codes(email, expires_at desc);
+create index if not exists idx_authorized_users_lookup on public.authorized_users(email, is_active);
 
--- 8. Enable Row Level Security (RLS) on all tables
+-- 9. Enable Row Level Security (RLS) on all tables
 alter table public.discount_settings enable row level security;
 alter table public.employees enable row level security;
 alter table public.credit_ledger enable row level security;
 alter table public.employee_discounts enable row level security;
 alter table public.store_credit_logs enable row level security;
 alter table public.discount_login_codes enable row level security;
+alter table public.authorized_users enable row level security;
 
--- 9. Complete, error-free RLS policies for application service access
+-- 10. Complete, error-free RLS policies for application service access
 drop policy if exists "discount_settings_all_access" on public.discount_settings;
 drop policy if exists "employees_all_access" on public.employees;
 drop policy if exists "credit_ledger_all_access" on public.credit_ledger;
 drop policy if exists "employee_discounts_all_access" on public.employee_discounts;
 drop policy if exists "store_credit_logs_all_access" on public.store_credit_logs;
 drop policy if exists "discount_login_codes_all_access" on public.discount_login_codes;
+drop policy if exists "authorized_users_all_access" on public.authorized_users;
 
 create policy "discount_settings_all_access"
   on public.discount_settings
@@ -175,6 +199,12 @@ create policy "store_credit_logs_all_access"
 
 create policy "discount_login_codes_all_access"
   on public.discount_login_codes
+  for all
+  using (true)
+  with check (true);
+
+create policy "authorized_users_all_access"
+  on public.authorized_users
   for all
   using (true)
   with check (true);

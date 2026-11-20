@@ -213,7 +213,7 @@ test('Slack Webhook /api/webhooks/slack: url_verification challenge response for
   assert.equal(jsonResult.challenge, '3eZbrAqImPgnRaeSIvtayYrIoaxkW3MyrhCHGyMr')
 })
 
-test('API Guards: Auth endpoint handles test mode 1234 verification', async () => {
+test('API Guards: Auth endpoint blocks unauthorized emails not in allowlist', async () => {
   const { default: authHandler } = await import('../api/auth.js')
 
   let statusCode = 0
@@ -232,16 +232,15 @@ test('API Guards: Auth endpoint handles test mode 1234 verification', async () =
 
   const req = {
     method: 'POST',
-    query: { route: 'verify-code' },
-    body: { email: 'admin@kawaiislimecompany.com', code: '1234' },
+    query: { route: 'request-code' },
+    body: { email: 'unauthorized_outsider@attacker.com' },
     headers: {},
   }
 
   await authHandler(req, mockRes)
-  assert.equal(statusCode, 200)
-  assert.equal(jsonResult.ok, true)
-  assert.ok(jsonResult.token, 'Should return a signed JWT/session token')
-  assert.equal(jsonResult.user.role, 'Admin')
+  assert.equal(statusCode, 403, 'Should reject unauthorized email with 403 Forbidden')
+  assert.equal(jsonResult.ok, false)
+  assert.match(jsonResult.error, /Access Denied/i)
 })
 
 test('API Guards: Unauthorized request blocked without session', async () => {
@@ -303,6 +302,12 @@ test('Shopify REST 2026-01: createEmailLockedPriceRule locks to prerequisite_cus
 test('Backend Endpoint /api/employees/create: Validates inputs and creates email-locked discount', async () => {
   const { default: createHandler } = await import('../api/employees/create.js')
 
+  const adminToken = createSessionToken({
+    username: 'admin@kawaiislimecompany.com',
+    email: 'admin@kawaiislimecompany.com',
+    role: 'Admin',
+  })
+
   // 1. Missing full name validation
   let statusCode = 0
   let jsonResult = null
@@ -317,7 +322,7 @@ test('Backend Endpoint /api/employees/create: Validates inputs and creates email
   await createHandler({
     method: 'POST',
     body: { full_name: '', work_email: 'test@kawaiislimecompany.com' },
-    headers: {},
+    headers: { authorization: `Bearer ${adminToken}` },
   }, mockRes)
 
   assert.equal(statusCode, 400)
@@ -336,7 +341,7 @@ test('Backend Endpoint /api/employees/create: Validates inputs and creates email
       monthly_credit_amount: 25.0,
       location_type: 'local',
     },
-    headers: {},
+    headers: { authorization: `Bearer ${adminToken}` },
   }, mockRes)
 
   assert.equal(statusCode, 201)
@@ -350,6 +355,12 @@ test('Backend Endpoint /api/employees/create: Validates inputs and creates email
 
 test('Backend Endpoint /api/employees/deactivate: Deactivates employee & discount code', async () => {
   const { default: deactivateHandler } = await import('../api/employees/deactivate.js')
+
+  const adminToken = createSessionToken({
+    username: 'admin@kawaiislimecompany.com',
+    email: 'admin@kawaiislimecompany.com',
+    role: 'Admin',
+  })
 
   let statusCode = 0
   let jsonResult = null
@@ -367,7 +378,7 @@ test('Backend Endpoint /api/employees/deactivate: Deactivates employee & discoun
       work_email: 'zunair@kawaiislimecompany.com',
       shopify_discount_id: 'gid://shopify/DiscountCodeNode/mock_9988776655',
     },
-    headers: {},
+    headers: { authorization: `Bearer ${adminToken}` },
   }, mockRes)
 
   assert.equal(statusCode, 200)
@@ -379,6 +390,12 @@ test('Backend Endpoint /api/employees/deactivate: Deactivates employee & discoun
 test('Backend Endpoint /api/employees: Lists employees', async () => {
   const { default: listHandler } = await import('../api/employees/index.js')
 
+  const adminToken = createSessionToken({
+    username: 'admin@kawaiislimecompany.com',
+    email: 'admin@kawaiislimecompany.com',
+    role: 'Admin',
+  })
+
   let statusCode = 0
   let jsonResult = null
   const mockRes = {
@@ -389,7 +406,7 @@ test('Backend Endpoint /api/employees: Lists employees', async () => {
     },
   }
 
-  await listHandler({ method: 'GET', headers: {} }, mockRes)
+  await listHandler({ method: 'GET', headers: { authorization: `Bearer ${adminToken}` } }, mockRes)
 
   assert.equal(statusCode, 200)
   assert.equal(jsonResult.success, true)

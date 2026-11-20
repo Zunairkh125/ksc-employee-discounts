@@ -1,4 +1,5 @@
 import { clean, admin, jsonError } from '../../lib/db.js'
+import { getSession, isEmailAuthorized } from '../../lib/session.js'
 import { deactivateDiscountCodeGraphQL } from '../../lib/shopify.js'
 
 export default async function handler(req, res) {
@@ -19,6 +20,18 @@ export default async function handler(req, res) {
   }
 
   try {
+    const supabase = admin()
+
+    // Protected: Validate caller is an authorized admin
+    const session = getSession(req)
+    if (!session?.email) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid admin session token required.' })
+    }
+    const isAuth = await isEmailAuthorized(session.email, supabase)
+    if (!isAuth) {
+      return res.status(403).json({ success: false, error: 'Access Denied: You are not authorized.' })
+    }
+
     const employeeId = clean(req.body?.id || req.body?.employee_id)
     const workEmail = clean(req.body?.work_email || req.body?.email).toLowerCase()
     let discountId = clean(
@@ -35,7 +48,6 @@ export default async function handler(req, res) {
       })
     }
 
-    const supabase = admin()
     let employee = null
 
     // Look up in `employees` table

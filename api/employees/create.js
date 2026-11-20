@@ -1,4 +1,5 @@
 import { clean, admin, jsonError } from '../../lib/db.js'
+import { getSession, isEmailAuthorized } from '../../lib/session.js'
 import { lookupUserByEmail, sendDirectMessage } from '../../lib/slack.js'
 import { buildWelcomeSlackMessage } from '../webhooks/slack.js'
 import {
@@ -27,6 +28,18 @@ export default async function handler(req, res) {
   }
 
   try {
+    const supabase = admin()
+
+    // Protected: Validate caller is an authorized admin
+    const session = getSession(req)
+    if (!session?.email) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid admin session token required.' })
+    }
+    const isAuth = await isEmailAuthorized(session.email, supabase)
+    if (!isAuth) {
+      return res.status(403).json({ success: false, error: 'Access Denied: You are not authorized to create employees.' })
+    }
+
     const fullName = clean(req.body?.full_name || req.body?.name)
     const workEmail = clean(req.body?.work_email || req.body?.email).toLowerCase()
     const discountPercentage = Number(req.body?.discount_percentage ?? req.body?.discount_percent ?? 20)
@@ -43,8 +56,6 @@ export default async function handler(req, res) {
     if (!Number.isFinite(discountPercentage) || discountPercentage <= 0 || discountPercentage > 100) {
       return res.status(400).json({ success: false, error: 'Discount percentage must be between 1 and 100.' })
     }
-
-    const supabase = admin()
 
     // 0. Check for existing employee with this work_email
     let existingEmployee = null

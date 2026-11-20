@@ -1,4 +1,5 @@
 import { admin, jsonError } from '../../lib/db.js'
+import { getSession, isEmailAuthorized } from '../../lib/session.js'
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', 'true')
@@ -19,6 +20,15 @@ export default async function handler(req, res) {
 
   try {
     const supabase = admin()
+    const session = getSession(req)
+    if (!session) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid admin session token required.' })
+    }
+    const isAuth = await isEmailAuthorized(session.email, supabase)
+    if (!isAuth) {
+      return res.status(403).json({ success: false, error: 'Access Denied: Unauthorized admin.' })
+    }
+
     let employeesList = []
 
     // Fetch from `employees` table
