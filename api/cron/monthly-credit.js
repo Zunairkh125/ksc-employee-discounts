@@ -112,7 +112,20 @@ export default async function handler(req, res) {
     for (const emp of activeEmployees) {
       const empName = emp.full_name || emp.work_email
       const customerId = emp.shopify_customer_id
-      const amountToCredit = Number(emp.monthly_credit_amount || monthlyAmount)
+      const rawCredit = emp.monthly_credit_amount
+      const amountToCredit =
+        rawCredit !== null && rawCredit !== undefined && !isNaN(Number(rawCredit))
+          ? Number(rawCredit)
+          : monthlyAmount
+
+      if (amountToCredit <= 0) {
+        results.push({
+          email: emp.work_email,
+          status: 'Skipped',
+          reason: '$0 monthly credit configured for employee',
+        })
+        continue
+      }
 
       if (!customerId) {
         failedCount++

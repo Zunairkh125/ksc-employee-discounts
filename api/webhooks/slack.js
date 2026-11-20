@@ -188,7 +188,10 @@ export default async function handler(req, res) {
             employeeName: existingEmp.full_name || realName,
             discountCode: existingEmp.discount_code,
             discountPercent: existingEmp.discount_percentage || 20,
-            creditAmount: existingEmp.monthly_credit_amount || 25,
+            creditAmount:
+              existingEmp.monthly_credit_amount !== undefined && existingEmp.monthly_credit_amount !== null
+                ? existingEmp.monthly_credit_amount
+                : 25,
             workEmail: email,
           })
           await sendDirectMessage(slackUserId, dmText).catch(() => {})

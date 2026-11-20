@@ -268,8 +268,14 @@ export default function App() {
         body: JSON.stringify({
           full_name: onboardName.trim(),
           work_email: onboardEmail.trim(),
-          discount_percentage: Number(onboardDiscount || settings.employee_discount_percent || 20),
-          monthly_credit_amount: Number(onboardCredit || settings.monthly_store_credit_amount || 25),
+          discount_percentage:
+            onboardDiscount !== '' && !isNaN(Number(onboardDiscount))
+              ? Number(onboardDiscount)
+              : Number(settings.employee_discount_percent ?? 20),
+          monthly_credit_amount:
+            onboardCredit !== '' && !isNaN(Number(onboardCredit))
+              ? Number(onboardCredit)
+              : Number(settings.monthly_store_credit_amount ?? 25),
           location_type: onboardLocation,
         }),
       })
@@ -295,8 +301,17 @@ export default function App() {
   }
 
   const handleIssueMonthlyCreditAll = async () => {
-    const activeCount = employees.filter((e) => (e.status || '').toLowerCase() === 'active').length
-    const totalAmount = (activeCount * Number(settings.monthly_store_credit_amount || 0)).toFixed(2)
+    const activeEmployees = employees.filter((e) => (e.status || '').toLowerCase() === 'active')
+    const activeCount = activeEmployees.length
+    const totalAmount = activeEmployees
+      .reduce((sum, e) => {
+        const amt =
+          e.monthly_credit_amount !== undefined && e.monthly_credit_amount !== null
+            ? Number(e.monthly_credit_amount)
+            : Number(settings.monthly_store_credit_amount || 0)
+        return sum + amt
+      }, 0)
+      .toFixed(2)
 
     if (activeCount === 0) {
       showToast('No active employees to credit.', 'error')
@@ -304,7 +319,7 @@ export default function App() {
     }
 
     const confirmed = window.confirm(
-      `Issue $${Number(settings.monthly_store_credit_amount).toFixed(2)} monthly store credit to all ${activeCount} active employees?\n\nTotal disbursement: $${totalAmount}`
+      `Issue monthly store credit to all ${activeCount} active employees?\n\nTotal disbursement: $${totalAmount}`
     )
     if (!confirmed) return
 
@@ -409,7 +424,10 @@ export default function App() {
             full_name: empName,
             work_email: emp.work_email,
             discount_percentage: emp.discount_percentage || emp.discount_percent || 20,
-            monthly_credit_amount: emp.monthly_credit_amount || 25,
+            monthly_credit_amount:
+              emp.monthly_credit_amount !== undefined && emp.monthly_credit_amount !== null
+                ? Number(emp.monthly_credit_amount)
+                : 25,
             location_type: emp.location_type || 'local',
           }),
         })
@@ -795,10 +813,16 @@ export default function App() {
                 </span>
                 <span className="credit-run-desc">
                   Total disbursement: $
-                  {(
-                    employees.filter((e) => (e.status || '').toLowerCase() === 'active').length *
-                    Number(settings.monthly_store_credit_amount || 0)
-                  ).toFixed(2)}
+                  {employees
+                    .filter((e) => (e.status || '').toLowerCase() === 'active')
+                    .reduce((sum, e) => {
+                      const amt =
+                        e.monthly_credit_amount !== undefined && e.monthly_credit_amount !== null
+                          ? Number(e.monthly_credit_amount)
+                          : Number(settings.monthly_store_credit_amount || 0)
+                      return sum + amt
+                    }, 0)
+                    .toFixed(2)}
                 </span>
               </div>
               <button
@@ -882,7 +906,10 @@ export default function App() {
                       .toUpperCase()
                     const isActive = (emp.status || '').toLowerCase() === 'active'
                     const discountVal = emp.discount_percentage || emp.discount_percent || 20
-                    const creditVal = emp.monthly_credit_amount || emp.total_credit_issued || 25
+                    const creditVal =
+                      emp.monthly_credit_amount !== undefined && emp.monthly_credit_amount !== null
+                        ? emp.monthly_credit_amount
+                        : (emp.total_credit_issued ?? 25)
                     const locationType = emp.location_type || 'local'
 
                     return (

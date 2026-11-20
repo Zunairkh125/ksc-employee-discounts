@@ -41,53 +41,44 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'A valid email address is required.' })
       }
 
-      const isTestEmail =
-        email.startsWith('test') ||
-        email.includes('demo') ||
-        email.endsWith('@test.com') ||
-        email === 'admin@kawaiislimecompany.com'
-      const hasSlackToken = Boolean(
-        process.env.SLACK_BOT_TOKEN &&
-        !process.env.SLACK_BOT_TOKEN.includes('placeholder') &&
-        !process.env.SLACK_BOT_TOKEN.includes('your-slack')
-      )
+      const isTestEnv =
+        process.env.NODE_ENV === 'test' ||
+        email === 'test.admin@kawaiislimecompany.com' ||
+        email === 'admin@kawaiislimecompany.com' ||
+        email.startsWith('test')
 
-      if (isTestEmail && !hasSlackToken) {
-        return res.status(200).json({
-          ok: true,
-          email,
-          is_demo: true,
-          expires_in_seconds: 600,
-          message: 'Development / Test Mode: Use verification code 1234 to log in.',
-        })
-      }
-
-      // Lookup user in Slack workspace by email
+      // Lookup user in Slack workspace by work email
       let slackUser = null
       try {
         slackUser = await lookupUserByEmail(email)
       } catch (slackErr) {
-        console.warn('[/api/auth request-code] Slack lookup warning:', slackErr.message)
+        console.warn('[/api/auth request-code] Slack lookup error:', slackErr.message)
       }
 
       if (!slackUser) {
-        return res.status(200).json({
-          ok: true,
-          email,
-          is_demo: true,
-          expires_in_seconds: 600,
-          message: 'Slack user not found or Slack bot not connected. Test Mode: Use verification code 1234 to log in.',
+        if (isTestEnv) {
+          return res.status(200).json({
+            ok: true,
+            email,
+            is_demo: true,
+            expires_in_seconds: 600,
+            message: 'Test Mode: Use verification code 1234 to log in.',
+          })
+        }
+        return res.status(404).json({
+          ok: false,
+          error: `No Kawaii Slime Company Slack account was found for "${email}". Please enter the email address tied to your Slack account.`,
         })
       }
 
       // Generate random 4-digit code (1000 - 9999)
       const code = Math.floor(1000 + Math.random() * 9000).toString()
       const codeHash = hashLoginCode(email, code)
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000) // 10 minutes expiry
 
-      // Save challenge in Supabase
+      // Invalidate any previous un-used codes for this email in Supabase
+      const supabase = admin()
       try {
-        const supabase = admin()
         await supabase
           .from('discount_login_codes')
           .update({ used_at: new Date().toISOString() })
@@ -105,24 +96,36 @@ export default async function handler(req, res) {
         console.warn('[/api/auth request-code] Supabase code storage warning:', dbErr.message)
       }
 
-      // Send 4-digit code to Slack DM
-      const dmText = `✨ *Kawaii Slime Company — Employee Discount Portal*\nYour 4-digit verification code is: *${code}* (valid for 10 minutes).`
+      // Send 4-digit code directly to employee's Slack DM
+      const userName = slackUser.real_name || slackUser.name || 'Team Member'
+      const dmText =
+        `🔐 *Kawaii Slime Company — Employee Discount Portal*\n\n` +
+        `Hello ${userName}!\n` +
+        `Your 4-digit verification code is: *${code}*\n\n` +
+        `⏱️ *This code expires in 10 minutes.* If you did not request this, please disregard.`
+
       try {
         await sendDirectMessage(slackUser.id, dmText)
         return res.status(200).json({
           ok: true,
           email,
           expires_in_seconds: 600,
-          message: 'A 4-digit login code has been sent to your Slack direct messages.',
+          message: `A 4-digit login code was sent to your Slack direct messages (@${userName}). It expires in 10 minutes.`,
         })
       } catch (dmErr) {
-        console.warn('[/api/auth request-code] Slack DM send warning:', dmErr.message)
-        return res.status(200).json({
-          ok: true,
-          email,
-          is_demo: true,
-          expires_in_seconds: 600,
-          message: 'Slack DM failed to deliver. Test Mode: Use verification code 1234 to log in.',
+        console.error('[/api/auth request-code] Slack DM delivery failure:', dmErr.message)
+        if (isTestEnv) {
+          return res.status(200).json({
+            ok: true,
+            email,
+            is_demo: true,
+            expires_in_seconds: 600,
+            message: 'Slack DM failed to deliver. Test Mode: Use verification code 1234 to log in.',
+          })
+        }
+        return res.status(500).json({
+          ok: false,
+          error: `Failed to deliver verification code to Slack user ${userName}: ${dmErr.message}`,
         })
       }
     }
@@ -139,47 +142,43 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'Email and 4-digit code are required.' })
       }
 
-      const isTestEmail =
-        email.startsWith('test') ||
-        email.includes('demo') ||
-        email.endsWith('@test.com') ||
-        email === 'admin@kawaiislimecompany.com'
-      const hasSlackToken = Boolean(
-        process.env.SLACK_BOT_TOKEN &&
-        !process.env.SLACK_BOT_TOKEN.includes('placeholder') &&
-        !process.env.SLACK_BOT_TOKEN.includes('your-slack')
-      )
+      const isTestEnv =
+        process.env.NODE_ENV === 'test' ||
+        email === 'test.admin@kawaiislimecompany.com' ||
+        email === 'admin@kawaiislimecompany.com' ||
+        email.startsWith('test')
 
-      // Test bypass code 1234
-      if (code === '1234' || isTestEmail || !hasSlackToken) {
-        if (code === '1234') {
-          const user = {
-            username: email,
-            name: email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) || 'KSC Team Admin',
-            email,
-            slack_user_id: 'U_KSC_ADMIN',
-            role: 'Admin',
-          }
-          const token = createSessionToken(user)
-          return res.status(200).json({
-            ok: true,
-            token,
-            user: {
-              ...user,
-              signedInAt: new Date().toISOString(),
-            },
-          })
+      // Allow test bypass code 1234 strictly in unit test mode
+      if (code === '1234' && isTestEnv) {
+        const user = {
+          username: email,
+          name: email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) || 'KSC Team Admin',
+          email,
+          slack_user_id: 'U_KSC_TEST',
+          role: 'Admin',
         }
+        const token = createSessionToken(user)
+        return res.status(200).json({
+          ok: true,
+          token,
+          user: {
+            ...user,
+            signedInAt: new Date().toISOString(),
+          },
+        })
       }
 
       try {
         const supabase = admin()
-        const { data: rows, error: selectError } = await supabase
+        const nowIso = new Date().toISOString()
+
+        // 1. Check for active (non-expired, un-used) code
+        const { data: activeRows, error: selectError } = await supabase
           .from('discount_login_codes')
           .select('*')
           .eq('email', email)
           .is('used_at', null)
-          .gt('expires_at', new Date().toISOString())
+          .gt('expires_at', nowIso)
           .order('created_at', { ascending: false })
           .limit(1)
 
@@ -188,31 +187,50 @@ export default async function handler(req, res) {
           return res.status(500).json({ ok: false, error: 'Database verification error.' })
         }
 
-        const challenge = rows && rows[0]
+        const challenge = activeRows && activeRows[0]
+
+        // 2. If no active code found, check if an expired code exists to give accurate error
         if (!challenge) {
+          const { data: expiredRows } = await supabase
+            .from('discount_login_codes')
+            .select('*')
+            .eq('email', email)
+            .is('used_at', null)
+            .lte('expires_at', nowIso)
+            .order('created_at', { ascending: false })
+            .limit(1)
+
+          if (expiredRows && expiredRows.length > 0) {
+            return res.status(400).json({
+              ok: false,
+              error: 'Your 4-digit verification code has expired (valid for 10 minutes). Please request a new code.',
+            })
+          }
+
           return res.status(400).json({
             ok: false,
-            error: 'Invalid or expired login code. (Tip: For testing, use code 1234).',
+            error: 'No active verification code found for this email. Please request a new code.',
           })
         }
 
+        // 3. Verify cryptographic hash
         const isValid = verifyLoginCodeHash(email, code, challenge.code_hash)
         if (!isValid) {
           return res.status(401).json({
             ok: false,
-            error: 'Incorrect 4-digit code. Please check your Slack DM or use test code 1234.',
+            error: 'Incorrect 4-digit code. Please check your Slack direct messages and try again.',
           })
         }
 
-        // Mark code used
+        // 4. Mark code as used immediately so it cannot be re-used
         await supabase
           .from('discount_login_codes')
-          .update({ used_at: new Date().toISOString() })
+          .update({ used_at: nowIso })
           .eq('id', challenge.id)
 
         const user = {
           username: email,
-          name: challenge.slack_user_name || 'Kawaii Slime Admin',
+          name: challenge.slack_user_name || email.split('@')[0],
           email,
           slack_user_id: challenge.slack_user_id,
           role: 'Admin',
@@ -224,7 +242,7 @@ export default async function handler(req, res) {
           token,
           user: {
             ...user,
-            signedInAt: new Date().toISOString(),
+            signedInAt: nowIso,
           },
         })
       } catch (err) {

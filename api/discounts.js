@@ -716,44 +716,100 @@ export default async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'Configured monthly store credit is $0.00.' })
       }
 
-      // Fetch all Active employees
-      const { data: activeEmployees, error: fetchErr } = await supabase
-        .from('employee_discounts')
-        .select('*')
-        .eq('status', 'Active')
+      // Fetch all Active employees (query public.employees first)
+      let activeEmployees = []
+      try {
+        const { data: emps, error: empErr } = await supabase.from('employees').select('*')
+        if (!empErr && Array.isArray(emps) && emps.length > 0) {
+          activeEmployees = emps
+            .filter(
+              (e) =>
+                e.is_active !== false &&
+                String(e.status || '').toLowerCase() !== 'inactive' &&
+                String(e.status || '').toLowerCase() !== 'revoked'
+            )
+            .map((e) => ({
+              id: e.id,
+              employee_name: e.full_name,
+              work_email: e.work_email,
+              shopify_customer_id: e.shopify_customer_id,
+              discount_code: e.discount_code,
+              discount_percent: e.discount_percentage,
+              monthly_credit_amount: e.monthly_credit_amount,
+              slack_user_id: e.slack_user_id,
+            }))
+        }
+      } catch {}
 
-      if (fetchErr) {
-        return res.status(500).json({ ok: false, error: 'Failed to fetch active employees.' })
+      if (activeEmployees.length === 0) {
+        const { data: legacyEmps, error: fetchErr } = await supabase
+          .from('employee_discounts')
+          .select('*')
+          .eq('status', 'Active')
+        if (fetchErr) {
+          return res.status(500).json({ ok: false, error: 'Failed to fetch active employees.' })
+        }
+        activeEmployees = legacyEmps || []
       }
 
       const employees = activeEmployees || []
       let successful = 0
       let failed = 0
+      let totalAmountIssued = 0
       const results = []
 
       for (const emp of employees) {
+        const rawCredit = emp.monthly_credit_amount
+        const amountToCredit =
+          rawCredit !== null && rawCredit !== undefined && !isNaN(Number(rawCredit))
+            ? Number(rawCredit)
+            : monthlyAmount
+
+        if (amountToCredit <= 0) {
+          results.push({
+            email: emp.work_email,
+            status: 'Skipped ($0 credit configured)',
+            amount: 0,
+          })
+          continue
+        }
+
         try {
           const tx = await issueStoreCredit({
             customerId: emp.shopify_customer_id,
-            amount: monthlyAmount,
+            amount: amountToCredit,
           })
 
-          const newTotal = Number(emp.total_credit_issued || 0) + monthlyAmount
           const nowIso = new Date().toISOString()
 
-          await supabase
-            .from('employee_discounts')
-            .update({
-              total_credit_issued: newTotal,
-              last_credit_issued_at: nowIso,
-              updated_at: nowIso,
-            })
-            .eq('id', emp.id)
+          // Update employees table
+          try {
+            await supabase
+              .from('employees')
+              .update({
+                last_credited_at: nowIso,
+                updated_at: nowIso,
+              })
+              .eq('id', emp.id)
+          } catch {}
+
+          // Update employee_discounts table
+          try {
+            const newTotal = Number(emp.total_credit_issued || 0) + amountToCredit
+            await supabase
+              .from('employee_discounts')
+              .update({
+                total_credit_issued: newTotal,
+                last_credit_issued_at: nowIso,
+                updated_at: nowIso,
+              })
+              .eq('work_email', emp.work_email)
+          } catch {}
 
           try {
             await supabase.from('credit_ledger').insert({
               employee_id: emp.id,
-              amount: monthlyAmount,
+              amount: amountToCredit,
               type: 'monthly_credit',
               shopify_transaction_id: tx.transactionId,
               created_at: nowIso,
@@ -765,7 +821,7 @@ export default async function handler(req, res) {
             employee_id: emp.id,
             employee_name: emp.employee_name,
             work_email: emp.work_email,
-            amount: monthlyAmount,
+            amount: amountToCredit,
             reason: 'Monthly Employee Store Credit',
             shopify_transaction_id: tx.transactionId,
             status: 'Success',
@@ -780,13 +836,14 @@ export default async function handler(req, res) {
           if (slackId) {
             const text =
               `✨ *Kawaii Slime Company Monthly Store Credit!* ✨\n` +
-              `Hi ${emp.employee_name}! Your monthly employee store credit of *$${monthlyAmount.toFixed(2)}* has been credited to your account.\n` +
+              `Hi ${emp.employee_name}! Your monthly employee store credit of *$${amountToCredit.toFixed(2)}* has been credited to your account.\n` +
               `Use it alongside your ${emp.discount_percent}% employee discount code \`${emp.discount_code}\` at checkout on kawaiislimecompany.com.`
             sendDirectMessage(slackId, text).catch(() => {})
           }
 
           successful++
-          results.push({ email: emp.work_email, status: 'Success', amount: monthlyAmount })
+          totalAmountIssued += amountToCredit
+          results.push({ email: emp.work_email, status: 'Success', amount: amountToCredit })
         } catch (err) {
           failed++
           results.push({ email: emp.work_email, status: 'Failed', error: err.message })
@@ -795,7 +852,7 @@ export default async function handler(req, res) {
               employee_discount_id: emp.id,
               employee_name: emp.employee_name,
               work_email: emp.work_email,
-              amount: monthlyAmount,
+              amount: amountToCredit,
               reason: 'Monthly Employee Store Credit',
               status: 'Failed',
               error_message: err.message,
@@ -812,6 +869,7 @@ export default async function handler(req, res) {
           totalEmployees: employees.length,
           successful,
           failed,
+          totalAmountIssued,
           monthlyAmountPerEmployee: monthlyAmount,
           totalAmountIssued: successful * monthlyAmount,
         },
