@@ -1,8 +1,10 @@
 import { clean, admin, jsonError } from '../../lib/db.js'
 import {
-  findOrCreateCustomerRest,
+  findOrCreateCustomerGraphQL,
   generateEmpDiscountCode,
-  createEmailLockedPriceRule,
+  createEmailLockedDiscountGraphQL,
+  issueStoreCreditGraphQL,
+  activateDiscountCodeGraphQL,
 } from '../../lib/shopify.js'
 
 export default async function handler(req, res) {
@@ -42,12 +44,12 @@ export default async function handler(req, res) {
 
     const supabase = admin()
 
-    // 0. Check for existing employee with this work_email to gracefully prevent duplicates
+    // 0. Check for existing employee with this work_email
     let existingEmployee = null
     try {
       const { data: found } = await supabase
         .from('employees')
-        .select('id, discount_code, work_email, status')
+        .select('*')
         .eq('work_email', workEmail)
         .maybeSingle()
       if (found) existingEmployee = found
@@ -57,16 +59,26 @@ export default async function handler(req, res) {
       try {
         const { data: foundAlt } = await supabase
           .from('employee_discounts')
-          .select('id, discount_code, work_email, status')
+          .select('*')
           .eq('work_email', workEmail)
           .maybeSingle()
-        if (foundAlt) existingEmployee = foundAlt
+        if (foundAlt) {
+          existingEmployee = {
+            id: foundAlt.id,
+            full_name: foundAlt.employee_name,
+            work_email: foundAlt.work_email,
+            discount_code: foundAlt.discount_code,
+            status: foundAlt.status,
+            is_active: String(foundAlt.status).toLowerCase() === 'active',
+          }
+        }
       } catch {}
     }
 
     const isReactivating =
       existingEmployee &&
-      (String(existingEmployee.status).toLowerCase() === 'inactive' ||
+      (existingEmployee.is_active === false ||
+        String(existingEmployee.status).toLowerCase() === 'inactive' ||
         String(existingEmployee.status).toLowerCase() === 'revoked')
 
     if (existingEmployee && !isReactivating) {
@@ -76,8 +88,8 @@ export default async function handler(req, res) {
       })
     }
 
-    // 1. Find or Create Shopify Customer
-    const customer = await findOrCreateCustomerRest({
+    // 1. Find or Create Shopify Customer via GraphQL (customerCreate)
+    const customer = await findOrCreateCustomerGraphQL({
       email: workEmail,
       fullName,
     })
@@ -86,32 +98,59 @@ export default async function handler(req, res) {
     // 2. Generate Unique Discount Code: EMP-{FIRSTNAME_UPPERCASE}-{4_DIGIT_RANDOM}
     const uniqueDiscountCode = generateEmpDiscountCode(fullName)
 
-    // 3 & 4. Create Email-Locked Shopify Price Rule & Attach Discount Code
-    const priceRuleResult = await createEmailLockedPriceRule({
+    // 3. Create Email-Locked Discount Code in Shopify via GraphQL (discountCodeBasicCreate)
+    // Strictly locks customerSelection to [shopifyCustomerId]
+    const discountResult = await createEmailLockedDiscountGraphQL({
       customerId: shopifyCustomerId,
+      employeeName: fullName,
+      workEmail,
       discountPercentage,
       uniqueCode: uniqueDiscountCode,
     })
 
-    const shopifyPriceRuleId = String(priceRuleResult.priceRuleId)
+    const shopifyDiscountId = String(discountResult.discountId)
 
-    // 5. Save to Supabase (public.employees & public.employee_discounts)
+    // If reactivating an existing discount in Shopify
+    if (isReactivating && existingEmployee?.shopify_discount_id) {
+      await activateDiscountCodeGraphQL(existingEmployee.shopify_discount_id).catch(() => {})
+    }
+
+    // 4. Credit initial store credit balance via Shopify GraphQL (storeCreditAccountCredit)
+    let creditTransaction = null
+    if (monthlyCreditAmount > 0) {
+      try {
+        creditTransaction = await issueStoreCreditGraphQL({
+          customerId: shopifyCustomerId,
+          amount: monthlyCreditAmount,
+          currencyCode: 'USD',
+        })
+      } catch (creditErr) {
+        console.warn('[Create Employee] Store credit issuance warning:', creditErr.message)
+      }
+    }
+
+    const nowIso = new Date().toISOString()
+
+    // 5. Save to Supabase (public.employees)
     const employeeRecord = {
       full_name: fullName,
       work_email: workEmail,
       shopify_customer_id: shopifyCustomerId,
-      shopify_price_rule_id: shopifyPriceRuleId,
+      shopify_discount_id: shopifyDiscountId,
+      shopify_price_rule_id: shopifyDiscountId,
       discount_code: uniqueDiscountCode,
       discount_percentage: discountPercentage,
       monthly_credit_amount: monthlyCreditAmount,
       location_type: locationType,
+      is_active: true,
       status: 'active',
+      last_credited_at: creditTransaction ? nowIso : null,
+      updated_at: nowIso,
     }
 
     let savedEmployee = null
     let saveError = null
 
-    // Try updating or inserting into `employees`
     try {
       let op = null
       if (isReactivating && existingEmployee?.id) {
@@ -124,21 +163,18 @@ export default async function handler(req, res) {
 
       if (!err && emp) {
         savedEmployee = emp
-      } else if (err && String(err.message).includes('shopify_price_rule_id')) {
-        // If existing table doesn't have shopify_price_rule_id, omit that column
-        const { shopify_price_rule_id: _omitted, ...recordWithoutRuleId } = employeeRecord
+      } else if (err && String(err.message).includes('shopify_discount_id')) {
+        // Fallback if DB doesn't have shopify_discount_id column
+        const { shopify_discount_id: _omitted, ...reducedRecord } = employeeRecord
         let retryOp = null
         if (isReactivating && existingEmployee?.id) {
-          retryOp = supabase
-            .from('employees')
-            .update(recordWithoutRuleId)
-            .eq('id', existingEmployee.id)
+          retryOp = supabase.from('employees').update(reducedRecord).eq('id', existingEmployee.id)
         } else {
-          retryOp = supabase.from('employees').insert(recordWithoutRuleId)
+          retryOp = supabase.from('employees').insert(reducedRecord)
         }
         const { data: retryEmp, error: retryErr } = await retryOp.select().single()
         if (!retryErr && retryEmp) {
-          savedEmployee = { ...retryEmp, shopify_price_rule_id: shopifyPriceRuleId }
+          savedEmployee = { ...retryEmp, shopify_discount_id: shopifyDiscountId }
         } else {
           saveError = retryErr
         }
@@ -149,16 +185,52 @@ export default async function handler(req, res) {
       saveError = e
     }
 
-    // Also sync to `employee_discounts` to guarantee data redundancy & backward compatibility
+    const targetEmpId = savedEmployee?.id || existingEmployee?.id
+
+    // 6. Record in credit_ledger if initial store credit was issued
+    if (creditTransaction && targetEmpId) {
+      try {
+        await supabase.from('credit_ledger').insert({
+          employee_id: targetEmpId,
+          amount: monthlyCreditAmount,
+          type: 'initial_credit',
+          shopify_transaction_id: creditTransaction.transactionId,
+          created_at: nowIso,
+        })
+      } catch (ledgerErr) {
+        console.warn('[Create Employee] credit_ledger insert warning:', ledgerErr.message)
+      }
+    }
+
+    // 7. Record in store_credit_logs (audit log)
+    if (creditTransaction) {
+      try {
+        await supabase.from('store_credit_logs').insert({
+          employee_id: targetEmpId,
+          employee_name: fullName,
+          work_email: workEmail,
+          amount: monthlyCreditAmount,
+          reason: 'Initial Employee Store Credit (Onboarding)',
+          shopify_transaction_id: creditTransaction.transactionId,
+          status: 'Success',
+          created_at: nowIso,
+        })
+      } catch (logErr) {
+        console.warn('[Create Employee] store_credit_logs insert warning:', logErr.message)
+      }
+    }
+
+    // 8. Backward compatibility sync to employee_discounts
     try {
       const fallbackRecord = {
         employee_name: fullName,
         work_email: workEmail,
         shopify_customer_id: shopifyCustomerId,
-        shopify_discount_id: shopifyPriceRuleId,
+        shopify_discount_id: shopifyDiscountId,
         discount_code: uniqueDiscountCode,
         discount_percent: discountPercentage,
-        total_credit_issued: 0,
+        total_credit_issued: creditTransaction ? monthlyCreditAmount : 0,
+        last_credit_issued_at: creditTransaction ? nowIso : null,
         status: 'Active',
       }
       const { data: altEmp } = await supabase
@@ -173,29 +245,17 @@ export default async function handler(req, res) {
           full_name: altEmp.employee_name,
           work_email: altEmp.work_email,
           shopify_customer_id: altEmp.shopify_customer_id,
-          shopify_price_rule_id: shopifyPriceRuleId,
+          shopify_discount_id: altEmp.shopify_discount_id,
           discount_code: altEmp.discount_code,
           discount_percentage: altEmp.discount_percent,
           monthly_credit_amount: monthlyCreditAmount,
           location_type: locationType,
+          is_active: true,
           status: 'active',
-          created_at: altEmp.created_at,
         }
-        saveError = null
       }
-    } catch {}
-
-    if (saveError && !savedEmployee) {
-      if (saveError.code === '23505' || String(saveError.message).includes('duplicate key')) {
-        return res.status(409).json({
-          success: false,
-          error: `Employee with email "${workEmail}" already exists in the database.`,
-        })
-      }
-      return res.status(500).json({
-        success: false,
-        error: `Database save failed: ${saveError.message || saveError}`,
-      })
+    } catch (e) {
+      console.warn('[Sync employee_discounts warning]:', e.message)
     }
 
     return res.status(201).json({
@@ -203,9 +263,9 @@ export default async function handler(req, res) {
       message: `Successfully created email-locked discount code ${uniqueDiscountCode} for ${fullName}!`,
       employee: savedEmployee || {
         ...employeeRecord,
-        id: `emp_${Date.now()}`,
-        created_at: new Date().toISOString(),
+        id: targetEmpId || `mock_${Date.now()}`,
       },
+      creditTransaction,
     })
   } catch (error) {
     return jsonError(res, error)

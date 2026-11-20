@@ -374,9 +374,20 @@ export default async function handler(req, res) {
         .select()
         .single()
 
-      // Log success
+      // Log success in store_credit_logs and credit_ledger
+      try {
+        await supabase.from('credit_ledger').insert({
+          employee_id: employee.id,
+          amount,
+          type: 'manual_credit',
+          shopify_transaction_id: txResult.transactionId,
+          created_at: nowIso,
+        })
+      } catch {}
+
       await supabase.from('store_credit_logs').insert({
         employee_discount_id: employee.id,
+        employee_id: employee.id,
         employee_name: employee.employee_name,
         work_email: employee.work_email,
         amount,
@@ -572,8 +583,19 @@ export default async function handler(req, res) {
             })
             .eq('id', emp.id)
 
+          try {
+            await supabase.from('credit_ledger').insert({
+              employee_id: emp.id,
+              amount: monthlyAmount,
+              type: 'monthly_credit',
+              shopify_transaction_id: tx.transactionId,
+              created_at: nowIso,
+            })
+          } catch {}
+
           await supabase.from('store_credit_logs').insert({
             employee_discount_id: emp.id,
+            employee_id: emp.id,
             employee_name: emp.employee_name,
             work_email: emp.work_email,
             amount: monthlyAmount,

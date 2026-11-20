@@ -28,7 +28,11 @@ export default async function handler(req, res) {
         .select('*')
         .order('created_at', { ascending: false })
       if (!error && Array.isArray(data)) {
-        employeesList = data
+        employeesList = data.map((e) => ({
+          ...e,
+          is_active: e.is_active !== undefined ? Boolean(e.is_active) : (e.status || '').toLowerCase() === 'active',
+          shopify_discount_id: e.shopify_discount_id || e.shopify_price_rule_id,
+        }))
       }
     } catch {}
 
@@ -46,11 +50,13 @@ export default async function handler(req, res) {
             full_name: d.employee_name,
             work_email: d.work_email,
             shopify_customer_id: d.shopify_customer_id,
+            shopify_discount_id: d.shopify_discount_id,
             shopify_price_rule_id: d.shopify_discount_id,
             discount_code: d.discount_code,
             discount_percentage: d.discount_percent,
             monthly_credit_amount: 25.0,
             location_type: 'local',
+            is_active: d.status === 'Active',
             status: d.status === 'Revoked' ? 'inactive' : 'active',
             created_at: d.created_at,
           }))

@@ -12,7 +12,7 @@
   ],
   "crons": [
     {
-      "path": "/api/discounts?route=monthly-credit",
+      "path": "/api/cron/monthly-credit",
       "schedule": "0 14 1 * *"
     }
   ]

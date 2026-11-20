@@ -9,18 +9,26 @@ import {
 } from '../lib/session.js'
 import {
   generateDiscountCode,
+  generateEmpDiscountCode,
   normalizeShopifyId,
   findOrCreateCustomer,
+  findOrCreateCustomerGraphQL,
   createEmailLockedDiscountCode,
+  createEmailLockedDiscountGraphQL,
+  createEmailLockedPriceRule,
   issueStoreCredit,
+  issueStoreCreditGraphQL,
   deactivateDiscountCode,
+  deactivateDiscountCodeGraphQL,
   activateDiscountCode,
+  activateDiscountCodeGraphQL,
 } from '../lib/shopify.js'
 import { verifySlackSignature } from '../lib/slack.js'
 
 // Set test environment secrets
 process.env.FINANCE_SESSION_SECRET = 'test-secret-key-for-ksc-discounts-32chars!'
 process.env.SLACK_SIGNING_SECRET = 'test-slack-signing-secret-12345'
+process.env.CRON_SECRET = 'test-cron-secret-67890'
 
 test('Auth: Hash and verify login code correctly', () => {
   const email = 'sarah@kawaiislimecompany.com'
@@ -88,64 +96,74 @@ test('Shopify: ID normalizer', () => {
 
 test('Shopify: Mock operations when credentials not configured', async () => {
   // Test customer finding/creation fallback
-  const customer = await findOrCreateCustomer({
+  const customer = await findOrCreateCustomerGraphQL({
     email: 'test.employee@kawaiislimecompany.com',
-    name: 'Emily Davis',
+    fullName: 'Emily Davis',
   })
   assert.ok(customer.id.startsWith('gid://shopify/Customer/'))
   assert.equal(customer.email, 'test.employee@kawaiislimecompany.com')
 
-  // Test discount code creation
-  const discount = await createEmailLockedDiscountCode({
+  // Test GraphQL discount code creation
+  const discount = await createEmailLockedDiscountGraphQL({
     customerId: customer.id,
     employeeName: 'Emily Davis',
-    workEmail: customer.email,
-    discountPercent: 20,
+    workEmail: 'test.employee@kawaiislimecompany.com',
+    discountPercentage: 20,
+    uniqueCode: 'EMP-EMILY-4422',
   })
-  assert.ok(discount.discountCode.startsWith('KSC-EMILY-'))
-  assert.equal(discount.discountPercent, 20)
-  assert.equal(discount.customerId, customer.id)
+  assert.ok(discount.discountId)
+  assert.equal(discount.discountCode, 'EMP-EMILY-4422')
+  assert.equal(discount.discountPercentage, 20)
 
-  // Test store credit issuance
-  const credit = await issueStoreCredit({
+  // Test GraphQL store credit issuance
+  const credit = await issueStoreCreditGraphQL({
     customerId: customer.id,
     amount: 25.0,
+    currencyCode: 'USD',
   })
+  assert.ok(credit.transactionId)
   assert.equal(credit.amount, '25.00')
   assert.equal(credit.currencyCode, 'USD')
 
-  // Test status toggles
-  const deact = await deactivateDiscountCode(discount.discountId)
+  // Test GraphQL discount code deactivation
+  const deact = await deactivateDiscountCodeGraphQL(discount.discountId)
   assert.equal(deact.success, true)
   assert.equal(deact.status, 'DEACTIVATED')
 
-  const act = await activateDiscountCode(discount.discountId)
+  // Test GraphQL discount code activation
+  const act = await activateDiscountCodeGraphQL(discount.discountId)
   assert.equal(act.success, true)
   assert.equal(act.status, 'ACTIVE')
 })
 
 test('Slack: HMAC signature verification with replay protection', () => {
-  const secret = process.env.SLACK_SIGNING_SECRET
+  const secret = 'test-slack-signing-secret-12345'
   const now = Date.now()
   const timestamp = Math.floor(now / 1000).toString()
-  const rawBody = JSON.stringify({ type: 'team_join', user: { id: 'U99999' } })
+  const rawBody = JSON.stringify({ type: 'event_callback', event: { type: 'team_join' } })
 
   const sigBase = `v0:${timestamp}:${rawBody}`
-  const signature = 'v0=' + crypto.createHmac('sha256', secret).update(sigBase).digest('hex')
+  const validSignature = 'v0=' + crypto.createHmac('sha256', secret).update(sigBase).digest('hex')
 
-  const headers = {
+  const validHeaders = {
     'x-slack-request-timestamp': timestamp,
-    'x-slack-signature': signature,
+    'x-slack-signature': validSignature,
   }
-
-  // Valid signature
-  assert.equal(verifySlackSignature(rawBody, headers, now), true, 'Valid signature should verify')
-
-  // Tampered body
   assert.equal(
-    verifySlackSignature(rawBody + 'tamper', headers, now),
+    verifySlackSignature(rawBody, validHeaders, now),
+    true,
+    'Valid HMAC signature must verify'
+  )
+
+  // Tampered signature
+  const invalidHeaders = {
+    'x-slack-request-timestamp': timestamp,
+    'x-slack-signature': 'v0=0000000000000000000000000000000000000000000000000000000000000000',
+  }
+  assert.equal(
+    verifySlackSignature(rawBody, invalidHeaders, now),
     false,
-    'Tampered body must fail verification'
+    'Invalid signature must fail'
   )
 
   // Replay check: timestamp older than 5 minutes (301 seconds)
@@ -163,7 +181,7 @@ test('Slack: HMAC signature verification with replay protection', () => {
   )
 })
 
-test('Slack Events: url_verification challenge response format', async () => {
+test('Slack Webhook /api/webhooks/slack: url_verification challenge response format', async () => {
   const mockReq = {
     method: 'POST',
     body: {
@@ -177,6 +195,7 @@ test('Slack Events: url_verification challenge response format', async () => {
   let statusCode = 0
   let jsonResult = null
   const mockRes = {
+    setHeader: () => {},
     status: (code) => {
       statusCode = code
       return {
@@ -187,8 +206,8 @@ test('Slack Events: url_verification challenge response format', async () => {
     },
   }
 
-  const { default: slackEventsHandler } = await import('../api/slack/events.js')
-  await slackEventsHandler(mockReq, mockRes)
+  const { default: webhookHandler } = await import('../api/webhooks/slack.js')
+  await webhookHandler(mockReq, mockRes)
 
   assert.equal(statusCode, 200)
   assert.equal(jsonResult.challenge, '3eZbrAqImPgnRaeSIvtayYrIoaxkW3MyrhCHGyMr')
@@ -228,7 +247,6 @@ test('API Guards: Auth endpoint handles test mode 1234 verification', async () =
 test('API Guards: Unauthorized request blocked without session', async () => {
   const { default: discountsHandler } = await import('../api/discounts.js')
 
-  // Temporarily set SUPABASE_URL to non-placeholder so guard triggers
   const origUrl = process.env.SUPABASE_URL
   process.env.SUPABASE_URL = 'https://realproject.supabase.co'
 
@@ -260,7 +278,6 @@ test('API Guards: Unauthorized request blocked without session', async () => {
 })
 
 test('Shopify REST 2026-01: generateEmpDiscountCode format EMP-{NAME}-{4DIGITS}', async () => {
-  const { generateEmpDiscountCode } = await import('../lib/shopify.js')
   const code = generateEmpDiscountCode('Zunair Rafiq')
   assert.match(code, /^EMP-ZUNAIR-\d{4}$/, 'Must match EMP-ZUNAIR-XXXX')
   assert.ok(!code.includes(' '), 'Code must contain no spaces')
@@ -271,7 +288,6 @@ test('Shopify REST 2026-01: generateEmpDiscountCode format EMP-{NAME}-{4DIGITS}'
 })
 
 test('Shopify REST 2026-01: createEmailLockedPriceRule locks to prerequisite_customer_ids', async () => {
-  const { createEmailLockedPriceRule } = await import('../lib/shopify.js')
   const res = await createEmailLockedPriceRule({
     customerId: '7891234567',
     discountPercentage: 20,
@@ -329,9 +345,10 @@ test('Backend Endpoint /api/employees/create: Validates inputs and creates email
   assert.match(jsonResult.employee.discount_code, /^EMP-ZUNAIR-\d{4}$/)
   assert.equal(jsonResult.employee.location_type, 'local')
   assert.equal(jsonResult.employee.status, 'active')
+  assert.equal(jsonResult.employee.is_active, true)
 })
 
-test('Backend Endpoint /api/employees/deactivate: Deactivates employee & price rule', async () => {
+test('Backend Endpoint /api/employees/deactivate: Deactivates employee & discount code', async () => {
   const { default: deactivateHandler } = await import('../api/employees/deactivate.js')
 
   let statusCode = 0
@@ -348,7 +365,7 @@ test('Backend Endpoint /api/employees/deactivate: Deactivates employee & price r
     method: 'POST',
     body: {
       work_email: 'zunair@kawaiislimecompany.com',
-      shopify_price_rule_id: '9988776655',
+      shopify_discount_id: 'gid://shopify/DiscountCodeNode/mock_9988776655',
     },
     headers: {},
   }, mockRes)
@@ -356,6 +373,7 @@ test('Backend Endpoint /api/employees/deactivate: Deactivates employee & price r
   assert.equal(statusCode, 200)
   assert.equal(jsonResult.success, true)
   assert.equal(jsonResult.employee.status, 'inactive')
+  assert.equal(jsonResult.employee.is_active, false)
 })
 
 test('Backend Endpoint /api/employees: Lists employees', async () => {
@@ -378,4 +396,38 @@ test('Backend Endpoint /api/employees: Lists employees', async () => {
   assert.ok(Array.isArray(jsonResult.employees))
 })
 
+test('Monthly Cron /api/cron/monthly-credit: CRON_SECRET guard and execution', async () => {
+  const { default: cronHandler } = await import('../api/cron/monthly-credit.js')
 
+  let statusCode = 0
+  let jsonResult = null
+  const mockRes = {
+    setHeader: () => {},
+    status: (code) => {
+      statusCode = code
+      return { json: (d) => { jsonResult = d } }
+    },
+  }
+
+  // 1. Unauthorized request without CRON_SECRET
+  await cronHandler({
+    method: 'GET',
+    headers: { authorization: 'Bearer wrong-secret' },
+  }, mockRes)
+
+  assert.equal(statusCode, 401)
+  assert.equal(jsonResult.success, false)
+
+  // 2. Authorized request with Bearer CRON_SECRET
+  statusCode = 0
+  jsonResult = null
+
+  await cronHandler({
+    method: 'GET',
+    headers: { authorization: `Bearer ${process.env.CRON_SECRET}` },
+  }, mockRes)
+
+  assert.equal(statusCode, 200)
+  assert.equal(jsonResult.success, true)
+  assert.ok(jsonResult.summary)
+})
