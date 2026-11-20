@@ -13,7 +13,7 @@
   "crons": [
     {
       "path": "/api/cron/monthly-credit",
-      "schedule": "0 14 1 * *"
+      "schedule": "0 17 1 * *"
     }
   ]
 }

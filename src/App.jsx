@@ -775,16 +775,16 @@ export default function App() {
             </form>
           </div>
 
-          {/* Action 2: Issue Monthly Store Credit */}
+          {/* Action 2: Run Monthly Store Credit (Test Run) */}
           <div className="action-card">
             <div>
               <h2 className="card-title">
-                <span>🎁</span> Issue Monthly Store Credit
+                <span>🎁</span> Run Monthly Credit Now (Test Run)
               </h2>
               <p className="card-desc">
-                Credits all currently <strong>Active</strong> employees in Shopify using the configured{' '}
+                Immediately credits all currently <strong>Active</strong> employees in Shopify using the configured{' '}
                 <strong>${Number(settings.monthly_store_credit_amount).toFixed(2)}</strong> store credit
-                amount. Logs all transactions in Supabase.
+                via Shopify GraphQL <code style={{ fontSize: '11px' }}>storeCreditAccountCredit</code>. Logs each run in Supabase <code style={{ fontSize: '11px' }}>credit_ledger</code>.
               </p>
             </div>
 
@@ -807,7 +807,7 @@ export default function App() {
                 onClick={handleIssueMonthlyCreditAll}
                 disabled={runningMonthlyCredit || employees.filter((e) => (e.status || '').toLowerCase() === 'active').length === 0}
               >
-                {runningMonthlyCredit ? 'Distributing Credits...' : '⚡ Issue Credit to All'}
+                {runningMonthlyCredit ? 'Distributing Credits...' : '⚡ Run Monthly Credit Now'}
               </button>
             </div>
           </div>
@@ -855,6 +855,7 @@ export default function App() {
                 <tr>
                   <th>Employee Name</th>
                   <th>Work Email</th>
+                  <th>Slack ID</th>
                   <th>Unique Discount Code</th>
                   <th>Discount %</th>
                   <th>Monthly Credit</th>
@@ -866,7 +867,7 @@ export default function App() {
               <tbody>
                 {filteredEmployees.length === 0 ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '40px 14px', color: '#b47a4f' }}>
+                    <td colSpan={9} style={{ textAlign: 'center', padding: '40px 14px', color: '#b47a4f' }}>
                       {dataLoading ? 'Loading employee records...' : 'No employees found matching criteria.'}
                     </td>
                   </tr>
@@ -900,6 +901,17 @@ export default function App() {
                         {/* Email */}
                         <td>
                           <span style={{ fontWeight: 600 }}>{emp.work_email}</span>
+                        </td>
+
+                        {/* Slack ID */}
+                        <td>
+                          {emp.slack_user_id ? (
+                            <code style={{ fontSize: '11px', background: '#f5eaef', padding: '2px 6px', borderRadius: '4px', color: '#6a3c1f' }}>
+                              {emp.slack_user_id}
+                            </code>
+                          ) : (
+                            <span style={{ fontSize: '12px', color: '#a08579' }}>Auto on join</span>
+                          )}
                         </td>
 
                         {/* Code */}

@@ -1,4 +1,6 @@
 import { clean, admin, jsonError } from '../../lib/db.js'
+import { lookupUserByEmail, sendDirectMessage } from '../../lib/slack.js'
+import { buildWelcomeSlackMessage } from '../webhooks/slack.js'
 import {
   findOrCreateCustomerGraphQL,
   generateEmpDiscountCode,
@@ -258,12 +260,39 @@ export default async function handler(req, res) {
       console.warn('[Sync employee_discounts warning]:', e.message)
     }
 
+    // 9. Look up Slack user and send Welcome DM if found
+    let slackUserId = null
+    try {
+      const slackUser = await lookupUserByEmail(workEmail).catch(() => null)
+      if (slackUser?.id) {
+        slackUserId = slackUser.id
+        if (targetEmpId) {
+          await supabase
+            .from('employees')
+            .update({ slack_user_id: slackUserId })
+            .eq('id', targetEmpId)
+            .catch(() => {})
+        }
+        const dmText = buildWelcomeSlackMessage({
+          employeeName: fullName,
+          discountCode: uniqueDiscountCode,
+          discountPercent: discountPercentage,
+          creditAmount: monthlyCreditAmount,
+          workEmail,
+        })
+        await sendDirectMessage(slackUserId, dmText).catch(() => {})
+      }
+    } catch (slackErr) {
+      console.warn('[Create Employee] Slack DM notification warning:', slackErr.message)
+    }
+
     return res.status(201).json({
       success: true,
       message: `Successfully created email-locked discount code ${uniqueDiscountCode} for ${fullName}!`,
-      employee: savedEmployee || {
-        ...employeeRecord,
+      employee: {
+        ...(savedEmployee || employeeRecord),
         id: targetEmpId || `mock_${Date.now()}`,
+        slack_user_id: slackUserId || savedEmployee?.slack_user_id || null,
       },
       creditTransaction,
     })
